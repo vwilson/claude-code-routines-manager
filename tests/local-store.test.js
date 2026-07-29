@@ -213,6 +213,39 @@ test('createTask rolls back the claimed prompt dir when the registry write fails
   assert.ok(!envelope.scheduledTasks.some((t) => t.id === 'rollback-me'));
 });
 
+test('createTask does not delete a dir another process registered in the same race window', async () => {
+  let gateCalls = 0;
+  const store = createLocalStore({
+    appDataDir,
+    claudeDir,
+    gate: {
+      isDesktopRunning: async () => {
+        gateCalls += 1;
+        if (gateCalls === 2) {
+          // Simulate a second process importing this exact orphan (same id, same
+          // filePath) between our SKILL.md write and our own registry mutation.
+          const envelope = JSON.parse(fs.readFileSync(registryPath, 'utf8'));
+          envelope.scheduledTasks.push({
+            id: 'raced',
+            enabled: true,
+            filePath: path.join(claudeDir, 'scheduled-tasks', 'raced', 'SKILL.md'),
+            createdAt: FIXED_NOW.getTime(),
+          });
+          fs.writeFileSync(registryPath, JSON.stringify(envelope, null, 2));
+        }
+        return false;
+      },
+    },
+    now: () => FIXED_NOW,
+  });
+  await assert.rejects(
+    store.createTask({ id: 'raced', cronExpression: '0 9 * * *', enabled: false }, { description: '', body: 'x' }),
+    (err) => err.code === 'VALIDATION',
+  );
+  // The competing process's registration must survive — its SKILL.md must not be deleted.
+  assert.ok(fs.existsSync(path.join(claudeDir, 'scheduled-tasks', 'raced', 'SKILL.md')));
+});
+
 test('listPromptDirIds includes both registered and orphaned prompt dirs', async () => {
   writeSkill('orphan-one');
   const store = makeStore();

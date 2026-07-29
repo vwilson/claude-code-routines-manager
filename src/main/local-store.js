@@ -257,8 +257,18 @@ function createLocalStore({
       });
       return entry;
     } catch (err) {
-      // Undo the claim so the id is retryable and doesn't linger as an unrecoverable stray dir.
-      fs.rmSync(skillDir, { recursive: true, force: true });
+      // Undo the claim so the id is retryable and doesn't linger as an unrecoverable stray
+      // dir — but only if nothing else has since registered it: another process could have
+      // imported this exact SKILL.md as an orphan in the gap before our own registry write,
+      // in which case deleting it would destroy that process's now-registered task. When we
+      // can't tell (e.g. the registry is unreadable), be conservative and leave the dir alone.
+      let claimedByOther = true;
+      try {
+        claimedByOther = (await readTasksRaw()).some((t) => t.id === spec.id);
+      } catch {
+        // unknown state — assume claimed, skip the delete
+      }
+      if (!claimedByOther) fs.rmSync(skillDir, { recursive: true, force: true });
       throw err;
     }
   }
