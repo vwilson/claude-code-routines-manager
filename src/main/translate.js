@@ -220,13 +220,20 @@ function buildSkillMd({ name, description, body }) {
 
 /**
  * Rewrite only the frontmatter `name:` line of a SKILL.md, preserving every other
- * line — extra frontmatter fields, body formatting, line endings — verbatim. A no-op
- * if there's no frontmatter block or no `name:` line to rewrite.
+ * line — extra frontmatter fields, body formatting, and even mixed line-ending styles
+ * within the same file — verbatim. A no-op if there's no frontmatter block or no
+ * `name:` line to rewrite.
+ *
+ * Splitting on a newline regex and rejoining with one chosen delimiter (the naive
+ * approach) would normalize every line ending to that one style, changing bytes
+ * outside the name: line in a file that mixes \n and \r\n. Splitting with a
+ * capturing group instead keeps each original delimiter as its own array element,
+ * untouched, so only the one line's content is ever replaced.
  */
 function renameSkillName(content, name) {
   const text = String(content);
-  const eol = text.includes('\r\n') ? '\r\n' : '\n';
-  const lines = text.split(/\r?\n/);
+  const parts = text.split(/(\r\n|\r|\n)/); // [line, delimiter, line, delimiter, ...]
+  const lines = parts.filter((_, i) => i % 2 === 0);
   if (lines[0]?.trim() !== '---') return text;
   let end = -1;
   for (let i = 1; i < lines.length; i++) {
@@ -238,8 +245,8 @@ function renameSkillName(content, name) {
   if (end === -1) return text;
   for (let i = 1; i < end; i++) {
     if (/^name:\s*/.test(lines[i])) {
-      lines[i] = `name: ${name}`;
-      return lines.join(eol);
+      parts[i * 2] = `name: ${name}`;
+      return parts.join('');
     }
   }
   return text;

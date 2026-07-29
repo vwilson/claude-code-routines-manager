@@ -150,12 +150,10 @@ function createLocalStore({
   /**
    * The single registry write path. `mutator` receives the freshly-parsed envelope
    * and mutates it in place; everything it does not touch round-trips byte-for-byte
-   * (modulo JSON formatting). `skipGateCheck` is only for best-effort rollback paths
-   * that must run even if Desktop started mid-transaction — see renameTask's use in
-   * applyUpdate's rollback.
+   * (modulo JSON formatting).
    */
-  async function mutateRegistry(mutator, { skipGateCheck = false } = {}) {
-    if (!skipGateCheck && (await gate.isDesktopRunning({ fresh: true }))) {
+  async function mutateRegistry(mutator) {
+    if (await gate.isDesktopRunning({ fresh: true })) {
       throw new AppError('CLAUDE_RUNNING', 'Claude Desktop is running — local registry changes would be lost. Close it (including the tray icon) first.');
     }
     const registryPath = requireRegistry();
@@ -169,7 +167,7 @@ function createLocalStore({
     await atomicWriteFile(registryPath, JSON.stringify(envelope, null, 2));
   }
 
-  async function updateTask(id, patch, { skipGateCheck = false } = {}) {
+  async function updateTask(id, patch) {
     let updated;
     await mutateRegistry((envelope) => {
       const task = envelope.scheduledTasks.find((t) => t.id === id);
@@ -178,8 +176,21 @@ function createLocalStore({
         if (patch[key] !== undefined) task[key] = patch[key];
       }
       updated = task;
-    }, { skipGateCheck });
+    });
     return updated;
+  }
+
+  /** The actual SKILL.md content write, shared by setPromptBody and applyUpdate (which
+   * writes to a task mid-rename, before the registry can be looked up by its new id). */
+  async function writePromptContent(filePath, id, promptBody) {
+    const existing = readSkill(filePath);
+    const content = translate.buildSkillMd({
+      name: existing?.frontmatter.name ?? id,
+      description: existing?.frontmatter.description ?? '',
+      body: promptBody,
+    });
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    await atomicWriteFile(filePath, content);
   }
 
   /** Replace the prompt body, preserving existing frontmatter. Ungated: the desktop reads SKILL.md at fire time. */
@@ -187,14 +198,7 @@ function createLocalStore({
     const tasks = await readTasksRaw();
     const task = tasks.find((t) => t.id === id);
     if (!task) throw new AppError('NOT_FOUND', `no local task "${id}"`);
-    const existing = readSkill(task.filePath);
-    const content = translate.buildSkillMd({
-      name: existing?.frontmatter.name ?? id,
-      description: existing?.frontmatter.description ?? '',
-      body: promptBody,
-    });
-    fs.mkdirSync(path.dirname(task.filePath), { recursive: true });
-    await atomicWriteFile(task.filePath, content);
+    await writePromptContent(task.filePath, id, promptBody);
   }
 
   function assertNewTaskId(id, tasks) {
@@ -235,23 +239,15 @@ function createLocalStore({
   }
 
   /**
-   * Rename a task's id: moves ~\.claude\scheduled-tasks\<id> to the new id (carrying
-   * SKILL.md and anything else in the dir along with it), then updates the registry
-   * entry's id and filePath. Rolls the directory move back if the registry write fails.
-   * `skipGateCheck` is for rollback-only use (see applyUpdate): forwarded to the
-   * internal registry write too, so a best-effort undo isn't blocked by the same
-   * Desktop-running check that made the forward operation fail partway through.
+   * Filesystem-only half of a rename: validates the new id, moves the prompt dir, and
+   * rewrites SKILL.md's name: line — no registry access at all. Returns the new file
+   * path and a restore() that undoes exactly this (content + location). Kept separate
+   * from the registry write so callers can stage the move, then commit (or not) to the
+   * registry as a single gated step, without ever needing a *second* gated write to
+   * undo a first one — see the module-level rationale on why that matters.
    */
-  async function renameTask(oldId, newId, { skipGateCheck = false } = {}) {
-    if (!skipGateCheck && (await gate.isDesktopRunning({ fresh: true }))) {
-      throw new AppError('CLAUDE_RUNNING', 'Claude Desktop is running — close it before renaming local tasks.');
-    }
-    const tasks = await readTasksRaw();
-    const task = tasks.find((t) => t.id === oldId);
-    if (!task) throw new AppError('NOT_FOUND', `no local task "${oldId}"`);
-    if (newId === oldId) return { id: task.id, filePath: task.filePath };
-    assertNewTaskId(newId, tasks);
-
+  async function moveTaskDir(task, newId, existingIds) {
+    assertNewTaskId(newId, existingIds);
     const oldDir = path.dirname(task.filePath);
     if (!fs.existsSync(task.filePath)) {
       throw new AppError('NOT_FOUND', `no SKILL.md at ${task.filePath}`);
@@ -263,77 +259,124 @@ function createLocalStore({
     const newFilePath = path.join(newDir, path.basename(task.filePath));
 
     fs.renameSync(oldDir, newDir);
-    let originalContent;
+    const originalContent = fs.readFileSync(newFilePath, 'utf8');
+    const renamed = translate.renameSkillName(originalContent, newId);
     let contentRewritten = false;
-    try {
-      originalContent = fs.readFileSync(newFilePath, 'utf8');
-      const renamed = translate.renameSkillName(originalContent, newId);
-      if (renamed !== originalContent) {
-        await atomicWriteFile(newFilePath, renamed);
-        contentRewritten = true;
-      }
+    if (renamed !== originalContent) {
+      await atomicWriteFile(newFilePath, renamed);
+      contentRewritten = true;
+    }
 
+    return {
+      newFilePath,
+      async restore() {
+        if (contentRewritten) {
+          try {
+            await atomicWriteFile(newFilePath, originalContent);
+          } catch {
+            // best effort — the directory move-back below still leaves things addressable under oldId
+          }
+        }
+        fs.renameSync(newDir, oldDir);
+      },
+    };
+  }
+
+  /**
+   * Rename a task's id: moves ~\.claude\scheduled-tasks\<id> to the new id (carrying
+   * SKILL.md and anything else in the dir along with it), then updates the registry
+   * entry's id and filePath. Rolls the directory move back if the registry write fails.
+   */
+  async function renameTask(oldId, newId) {
+    if (await gate.isDesktopRunning({ fresh: true })) {
+      throw new AppError('CLAUDE_RUNNING', 'Claude Desktop is running — close it before renaming local tasks.');
+    }
+    const tasks = await readTasksRaw();
+    const task = tasks.find((t) => t.id === oldId);
+    if (!task) throw new AppError('NOT_FOUND', `no local task "${oldId}"`);
+    if (newId === oldId) return { id: task.id, filePath: task.filePath };
+
+    const move = await moveTaskDir(task, newId, tasks);
+    try {
       await mutateRegistry((envelope) => {
         const entry = envelope.scheduledTasks.find((t) => t.id === oldId);
         if (!entry) throw new AppError('NOT_FOUND', `no local task "${oldId}" in the registry (it may have changed externally)`);
         // Re-check against the freshly-read envelope: the earlier snapshot could be stale.
         assertNewTaskId(newId, envelope.scheduledTasks);
         entry.id = newId;
-        entry.filePath = newFilePath;
+        entry.filePath = move.newFilePath;
         if (envelope.recordedSkips && Object.prototype.hasOwnProperty.call(envelope.recordedSkips, oldId)) {
           envelope.recordedSkips[newId] = envelope.recordedSkips[oldId];
           delete envelope.recordedSkips[oldId];
         }
-      }, { skipGateCheck });
+      });
     } catch (err) {
-      if (contentRewritten) {
-        try {
-          await atomicWriteFile(newFilePath, originalContent);
-        } catch {
-          // best effort — the directory rollback below still leaves a consistent (if renamed) prompt
-        }
-      }
-      fs.renameSync(newDir, oldDir);
+      await move.restore();
       throw err;
     }
-    return { id: newId, filePath: newFilePath };
+    return { id: newId, filePath: move.newFilePath };
   }
 
   /**
-   * Combined drawer save: rename (if `newId` differs), then write the prompt body
-   * and/or patch fields. If a later step fails after the rename already landed, both
-   * the prompt body and the rename are rolled back so the caller keeps addressing a
-   * task that still exists, unedited, under its original id — instead of one that's
-   * missing on both sides, or silently carrying an edit the save reported as failed.
-   * The rollback rename runs with skipGateCheck so a Desktop-running race that broke
-   * the forward save can't also block undoing it.
+   * Combined drawer save: stage the filesystem changes first — the directory move,
+   * the rewritten SKILL.md name, and/or the new prompt body — then commit the id
+   * rename and the patch fields to the registry together in a single gated write.
+   * If that write fails (or never runs, e.g. Desktop starts partway through), only
+   * the staged filesystem changes need undoing, and that undo touches only the
+   * prompt directory, never the registry — so it can't be defeated by Desktop's
+   * "loads the registry once at startup, rewrites it wholesale" behavior the way a
+   * *second* gated registry write (attempting to reverse a first one it already
+   * committed) could be: Desktop might silently clobber that second write with its
+   * own already-loaded, stale copy, leaving the registry and the directory disagreeing.
    */
   async function applyUpdate(id, { newId, patch, promptBody } = {}) {
+    const tasks = await readTasksRaw();
+    const task = tasks.find((t) => t.id === id);
+    if (!task) throw new AppError('NOT_FOUND', `no local task "${id}"`);
+
     const willRename = newId !== undefined && newId !== id;
-    if (willRename) await renameTask(id, newId);
+    const move = willRename ? await moveTaskDir(task, newId, tasks) : null;
     const currentId = willRename ? newId : id;
+    const filePath = willRename ? move.newFilePath : task.filePath;
 
     let originalPromptRaw;
     let promptRewritten = false;
     try {
       if (promptBody !== undefined) {
-        const task = (await readTasksRaw()).find((t) => t.id === currentId);
-        if (!task) throw new AppError('NOT_FOUND', `no local task "${currentId}"`);
         try {
-          originalPromptRaw = fs.readFileSync(task.filePath, 'utf8');
+          originalPromptRaw = fs.readFileSync(filePath, 'utf8');
         } catch {
           originalPromptRaw = undefined; // no existing file to restore
         }
-        await setPromptBody(currentId, promptBody);
+        await writePromptContent(filePath, currentId, promptBody);
         promptRewritten = true;
       }
-      if (patch && Object.keys(patch).length > 0) await updateTask(currentId, patch);
+
+      if (willRename || (patch && Object.keys(patch).length > 0)) {
+        await mutateRegistry((envelope) => {
+          const entry = envelope.scheduledTasks.find((t) => t.id === id);
+          if (!entry) throw new AppError('NOT_FOUND', `no local task "${id}" in the registry (it may have changed externally)`);
+          if (willRename) {
+            assertNewTaskId(newId, envelope.scheduledTasks);
+            entry.id = newId;
+            entry.filePath = move.newFilePath;
+            if (envelope.recordedSkips && Object.prototype.hasOwnProperty.call(envelope.recordedSkips, id)) {
+              envelope.recordedSkips[newId] = envelope.recordedSkips[id];
+              delete envelope.recordedSkips[id];
+            }
+          }
+          if (patch) {
+            for (const key of PATCHABLE_FIELDS) {
+              if (patch[key] !== undefined) entry[key] = patch[key];
+            }
+          }
+        });
+      }
     } catch (err) {
       if (promptRewritten && originalPromptRaw !== undefined) {
-        const task = (await readTasksRaw()).find((t) => t.id === currentId);
-        if (task) await atomicWriteFile(task.filePath, originalPromptRaw).catch(() => {});
+        await atomicWriteFile(filePath, originalPromptRaw).catch(() => {});
       }
-      if (willRename) await renameTask(currentId, id, { skipGateCheck: true }).catch(() => {});
+      if (move) await move.restore();
       throw err;
     }
     return getTask(currentId);

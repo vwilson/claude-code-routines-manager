@@ -292,52 +292,31 @@ test('applyUpdate renames and patches in the same call', async () => {
   assert.equal(envelope.scheduledTasks[0].displayName, 'Beta Name');
 });
 
-test('applyUpdate rolls back the rename if the subsequent patch fails', async () => {
-  let calls = 0;
-  // false, false (the forward rename's two gate checks) -> true (updateTask's check fails).
-  // The rollback rename runs with skipGateCheck, so it makes no further gate calls at all.
+test('applyUpdate rolls back the staged directory move if the combined registry write fails, without ever touching the registry', async () => {
+  // The id rename and the patch commit in one gated registry write; if Desktop is
+  // running, that write never happens at all — so there's nothing to undo on the
+  // registry side, only the filesystem staging (directory move + frontmatter rewrite).
   const store = createLocalStore({
     appDataDir,
     claudeDir,
-    gate: { isDesktopRunning: async () => ++calls === 3 },
+    gate: { isDesktopRunning: async () => true },
     now: () => FIXED_NOW,
   });
+  const before = fs.readFileSync(registryPath, 'utf8');
   await assert.rejects(
     store.applyUpdate('alpha', { newId: 'beta', patch: { displayName: 'Beta Name' } }),
     (err) => err.code === 'CLAUDE_RUNNING',
   );
   assert.equal(fs.existsSync(path.join(claudeDir, 'scheduled-tasks', 'alpha', 'SKILL.md')), true);
   assert.equal(fs.existsSync(path.join(claudeDir, 'scheduled-tasks', 'beta')), false);
-  const envelope = JSON.parse(fs.readFileSync(registryPath, 'utf8'));
-  assert.equal(envelope.scheduledTasks[0].id, 'alpha');
-  assert.equal(envelope.scheduledTasks[0].displayName, undefined);
+  assert.equal(fs.readFileSync(registryPath, 'utf8'), before);
 });
 
-test('applyUpdate rolls the rename back even while Claude Desktop stays running throughout', async () => {
-  // Unlike the previous test (Desktop flips "running" for exactly one check), Desktop
-  // is running for the failing patch update AND every check after — the rollback must
-  // still succeed because it never consults the gate at all (skipGateCheck).
-  let calls = 0;
+test('applyUpdate restores the staged prompt body and directory move together if the registry write fails', async () => {
   const store = createLocalStore({
     appDataDir,
     claudeDir,
-    gate: { isDesktopRunning: async () => ++calls >= 3 },
-    now: () => FIXED_NOW,
-  });
-  await assert.rejects(
-    store.applyUpdate('alpha', { newId: 'beta', patch: { displayName: 'Beta Name' } }),
-    (err) => err.code === 'CLAUDE_RUNNING',
-  );
-  assert.equal(fs.existsSync(path.join(claudeDir, 'scheduled-tasks', 'alpha', 'SKILL.md')), true);
-  assert.equal(fs.existsSync(path.join(claudeDir, 'scheduled-tasks', 'beta')), false);
-});
-
-test('applyUpdate restores the original prompt body if the subsequent patch update fails', async () => {
-  let calls = 0;
-  const store = createLocalStore({
-    appDataDir,
-    claudeDir,
-    gate: { isDesktopRunning: async () => ++calls === 3 },
+    gate: { isDesktopRunning: async () => true },
     now: () => FIXED_NOW,
   });
   await assert.rejects(
