@@ -232,6 +232,54 @@ function createLocalStore({
     return entry;
   }
 
+  /**
+   * Rename a task's id: moves ~\.claude\scheduled-tasks\<id> to the new id (carrying
+   * SKILL.md and anything else in the dir along with it), then updates the registry
+   * entry's id and filePath. Rolls the directory move back if the registry write fails.
+   */
+  async function renameTask(oldId, newId) {
+    if (await gate.isDesktopRunning({ fresh: true })) {
+      throw new AppError('CLAUDE_RUNNING', 'Claude Desktop is running — close it before renaming local tasks.');
+    }
+    const tasks = await readTasksRaw();
+    const task = tasks.find((t) => t.id === oldId);
+    if (!task) throw new AppError('NOT_FOUND', `no local task "${oldId}"`);
+    if (newId === oldId) return { id: task.id, filePath: task.filePath };
+    assertNewTaskId(newId, tasks);
+
+    const oldDir = path.dirname(task.filePath);
+    if (!fs.existsSync(task.filePath)) {
+      throw new AppError('NOT_FOUND', `no SKILL.md at ${task.filePath}`);
+    }
+    const newDir = path.join(skillsDir, newId);
+    if (fs.existsSync(newDir)) {
+      throw new AppError('VALIDATION', `"${newDir}" already exists`);
+    }
+    const newFilePath = path.join(newDir, path.basename(task.filePath));
+
+    fs.renameSync(oldDir, newDir);
+    const skill = readSkill(newFilePath);
+    if (skill) {
+      await atomicWriteFile(
+        newFilePath,
+        translate.buildSkillMd({ name: newId, description: skill.frontmatter.description ?? '', body: skill.body }),
+      );
+    }
+
+    try {
+      await mutateRegistry((envelope) => {
+        const entry = envelope.scheduledTasks.find((t) => t.id === oldId);
+        if (!entry) throw new AppError('NOT_FOUND', `no local task "${oldId}" in the registry (it may have changed externally)`);
+        entry.id = newId;
+        entry.filePath = newFilePath;
+      });
+    } catch (err) {
+      fs.renameSync(newDir, oldDir);
+      throw err;
+    }
+    return { id: newId, filePath: newFilePath };
+  }
+
   /** Re-register an orphaned prompt dir as a scheduled task (SKILL.md must already exist). */
   async function importOrphan(spec) {
     const filePath = path.join(skillsDir, spec.id, 'SKILL.md');
@@ -253,6 +301,7 @@ function createLocalStore({
     updateTask,
     setPromptBody,
     createTask,
+    renameTask,
     importOrphan,
   };
 }

@@ -190,3 +190,57 @@ test('setPromptBody replaces the body but keeps frontmatter', async () => {
   assert.equal(promptBody, 'New body.\n');
   assert.equal(frontmatter.description, 'A test task');
 });
+
+test('renameTask moves the prompt dir and updates the registry entry', async () => {
+  const store = makeStore();
+  const result = await store.renameTask('alpha', 'beta');
+  const expectedFilePath = path.join(claudeDir, 'scheduled-tasks', 'beta', 'SKILL.md');
+  assert.equal(result.id, 'beta');
+  assert.equal(result.filePath, expectedFilePath);
+  assert.equal(fs.existsSync(path.join(claudeDir, 'scheduled-tasks', 'alpha')), false);
+  const skill = fs.readFileSync(expectedFilePath, 'utf8');
+  assert.match(skill, /name: beta/);
+  assert.match(skill, /description: A test task/);
+  assert.match(skill, /Prompt body\./);
+  const envelope = JSON.parse(fs.readFileSync(registryPath, 'utf8'));
+  assert.equal(envelope.scheduledTasks.length, 1);
+  assert.equal(envelope.scheduledTasks[0].id, 'beta');
+  assert.equal(envelope.scheduledTasks[0].filePath, expectedFilePath);
+  assert.equal(envelope.scheduledTasks[0].cronExpression, '0 7 * * 1-5'); // unrelated fields untouched
+});
+
+test('renameTask rejects an invalid new id', async () => {
+  await assert.rejects(makeStore().renameTask('alpha', 'Bad Id!'), (err) => err.code === 'VALIDATION');
+});
+
+test('renameTask rejects a new id already used by another registry entry', async () => {
+  const betaFilePath = writeSkill('beta');
+  const envelope = JSON.parse(fs.readFileSync(registryPath, 'utf8'));
+  envelope.scheduledTasks.push({ id: 'beta', enabled: true, filePath: betaFilePath, createdAt: 1 });
+  fs.writeFileSync(registryPath, JSON.stringify(envelope, null, 2));
+  await assert.rejects(makeStore().renameTask('alpha', 'beta'), (err) => err.code === 'VALIDATION');
+});
+
+test('renameTask rejects a new id whose prompt dir already exists as an orphan', async () => {
+  writeSkill('orphan-one');
+  await assert.rejects(makeStore().renameTask('alpha', 'orphan-one'), (err) => err.code === 'VALIDATION');
+  assert.equal(fs.existsSync(path.join(claudeDir, 'scheduled-tasks', 'alpha')), true);
+});
+
+test('renameTask rejects unknown source ids with NOT_FOUND', async () => {
+  await assert.rejects(makeStore().renameTask('nope', 'whatever'), (err) => err.code === 'NOT_FOUND');
+});
+
+test('renameTask is a no-op when the id is unchanged', async () => {
+  const store = makeStore();
+  const result = await store.renameTask('alpha', 'alpha');
+  assert.equal(result.id, 'alpha');
+  assert.equal(fs.existsSync(path.join(claudeDir, 'scheduled-tasks', 'alpha', 'SKILL.md')), true);
+});
+
+test('renameTask is blocked while Claude Desktop runs, leaving the filesystem untouched', async () => {
+  gateState = true;
+  await assert.rejects(makeStore().renameTask('alpha', 'beta'), (err) => err.code === 'CLAUDE_RUNNING');
+  assert.equal(fs.existsSync(path.join(claudeDir, 'scheduled-tasks', 'alpha')), true);
+  assert.equal(fs.existsSync(path.join(claudeDir, 'scheduled-tasks', 'beta')), false);
+});

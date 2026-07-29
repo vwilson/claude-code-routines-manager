@@ -115,6 +115,13 @@ function registerIpc({ gate, cloudApi, localStore }) {
     return localStore.getTask(id);
   });
 
+  handle('local:rename', async ({ id, newId }) => {
+    requireString(id, 'id');
+    requireString(newId, 'newId', { re: translate.LOCAL_ID_RE });
+    await localStore.renameTask(id, newId);
+    return localStore.getTask(newId);
+  });
+
   handle('local:importOrphan', async ({ id, cronExpression, fireAt, cwd, model, displayName, enabled }) => {
     requireString(id, 'id', { re: translate.LOCAL_ID_RE });
     const schedule = requireSchedule({ cronExpression, oneShotAt: fireAt }, 'fireAt');

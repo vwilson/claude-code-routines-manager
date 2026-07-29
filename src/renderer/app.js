@@ -205,6 +205,13 @@ async function drawerSave(form) {
   try {
     if (kind === 'local') {
       const original = data.task;
+      let currentId = original.id;
+      const newId = changedValue(form, 'id', original.id);
+      if (newId !== undefined) {
+        state.drawer.data = await call('localRename', { id: currentId, newId });
+        currentId = newId;
+        state.localWriteNotice = true;
+      }
       const patch = {};
       const displayName = changedValue(form, 'displayName', original.displayName);
       if (displayName !== undefined) patch.displayName = displayName;
@@ -220,15 +227,18 @@ async function drawerSave(form) {
       const promptInput = form.elements.promptBody;
       const promptBody = promptInput.value !== data.promptBody ? promptInput.value : undefined;
       if (Object.keys(patch).length === 0 && promptBody === undefined) {
-        toast('No changes to save', true);
-        return;
+        if (newId === undefined) {
+          toast('No changes to save', true);
+          return;
+        }
+      } else {
+        state.drawer.data = await call('localUpdate', {
+          id: currentId,
+          ...(Object.keys(patch).length > 0 && { patch }),
+          ...(promptBody !== undefined && { promptBody }),
+        });
+        if (Object.keys(patch).length > 0) state.localWriteNotice = true;
       }
-      state.drawer.data = await call('localUpdate', {
-        id: original.id,
-        ...(Object.keys(patch).length > 0 && { patch }),
-        ...(promptBody !== undefined && { promptBody }),
-      });
-      if (Object.keys(patch).length > 0) state.localWriteNotice = true;
     } else {
       const original = data;
       const patch = {};
