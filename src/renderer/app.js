@@ -205,6 +205,7 @@ async function drawerSave(form) {
   try {
     if (kind === 'local') {
       const original = data.task;
+      const newId = changedValue(form, 'id', original.id);
       const patch = {};
       const displayName = changedValue(form, 'displayName', original.displayName);
       if (displayName !== undefined) patch.displayName = displayName;
@@ -219,16 +220,19 @@ async function drawerSave(form) {
       }
       const promptInput = form.elements.promptBody;
       const promptBody = promptInput.value !== data.promptBody ? promptInput.value : undefined;
-      if (Object.keys(patch).length === 0 && promptBody === undefined) {
+      if (newId === undefined && Object.keys(patch).length === 0 && promptBody === undefined) {
         toast('No changes to save', true);
         return;
       }
+      // One IPC call: the main process validates cron/cwd/promptBody (and the new id's
+      // format) before renaming, so a rejected field can't leave the rename committed alone.
       state.drawer.data = await call('localUpdate', {
         id: original.id,
+        ...(newId !== undefined && { newId }),
         ...(Object.keys(patch).length > 0 && { patch }),
         ...(promptBody !== undefined && { promptBody }),
       });
-      if (Object.keys(patch).length > 0) state.localWriteNotice = true;
+      if (newId !== undefined || Object.keys(patch).length > 0) state.localWriteNotice = true;
     } else {
       const original = data;
       const patch = {};

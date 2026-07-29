@@ -47,7 +47,8 @@ npm test
   a move or a duplicate; the dialogs' warnings say so.
 - **Duplicate** copies within a side and never touches the original. A local copy inherits
   the whole registry entry (including fields this app does not model, e.g. `useWorktree`)
-  minus run state, and gets its own `~\.claude\scheduled-tasks\<new-id>\SKILL.md`. A cloud
+  minus run state, and gets its own `~\.claude\scheduled-tasks\<new-id>\SKILL.md` — copied
+  byte-for-byte with only the `name:` line repointed, the same fidelity a rename keeps. A cloud
   copy reuses the source's `job_config` verbatim with fresh event uuids. Both default to
   disabled and always ask for the schedule, so a copy never silently doubles a run.
   The local copy claims its `SKILL.md` with an exclusive create, so a concurrent

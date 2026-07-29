@@ -188,7 +188,6 @@ export function localDrawer({ task, promptBody }) {
       el('button', { type: 'button', dataset: { action: 'drawer-close' } }, 'Close'),
     ),
     kvList([
-      ['id', task.id],
       ['created', formatTime(task.createdAt)],
       ['last run', formatTime(task.lastRunAt)],
       ['next run', task.nextRunAt ? `${formatTime(task.nextRunAt)} (incl. ${task.jitterSeconds}s jitter)` : '—'],
@@ -196,6 +195,11 @@ export function localDrawer({ task, promptBody }) {
       ['worktree', task.useWorktree ? `yes (${task.sourceBranch ?? 'default branch'})` : undefined],
     ]),
     el('form', { id: 'drawer-form' },
+      field(
+        'Routine id',
+        el('input', { name: 'id', value: task.id, spellcheck: 'false' }),
+        el('div', { class: 'muted' }, 'Renaming moves ~\\.claude\\scheduled-tasks\\<id>\\SKILL.md on disk.'),
+      ),
       field('Display name', el('input', { name: 'displayName', value: task.displayName ?? '' })),
       task.cronExpression !== undefined || !task.fireAt
         ? cronField('cronExpression', task.cronExpression, { utc: false })
