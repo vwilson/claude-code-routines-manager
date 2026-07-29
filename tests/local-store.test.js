@@ -167,6 +167,39 @@ test('createTask rejects invalid and duplicate ids', async () => {
   );
 });
 
+test('createTask refuses to overwrite an existing orphaned SKILL.md', async () => {
+  const orphanPath = writeSkill('collision', 'Orphan prompt — do not touch.', 'left behind');
+  const before = fs.readFileSync(orphanPath, 'utf8');
+  const store = makeStore();
+  await assert.rejects(
+    store.createTask(
+      { id: 'collision', cronExpression: '0 9 * * 1-5', enabled: false },
+      { description: 'Moved from cloud', body: 'Cloud prompt body.' },
+    ),
+    (err) => err.code === 'VALIDATION',
+  );
+  assert.equal(fs.readFileSync(orphanPath, 'utf8'), before);
+  const envelope = JSON.parse(fs.readFileSync(registryPath, 'utf8'));
+  assert.ok(!envelope.scheduledTasks.some((t) => t.id === 'collision'));
+});
+
+test('createTask refuses an id whose prompt dir exists even without a SKILL.md', async () => {
+  const dir = path.join(claudeDir, 'scheduled-tasks', 'empty-dir');
+  fs.mkdirSync(dir, { recursive: true });
+  const store = makeStore();
+  await assert.rejects(
+    store.createTask({ id: 'empty-dir', cronExpression: '0 9 * * *', enabled: false }, { description: '', body: 'x' }),
+    (err) => err.code === 'VALIDATION',
+  );
+  assert.deepEqual(fs.readdirSync(dir), []);
+});
+
+test('listPromptDirIds includes both registered and orphaned prompt dirs', async () => {
+  writeSkill('orphan-one');
+  const store = makeStore();
+  assert.deepEqual(new Set(store.listPromptDirIds()), new Set(['alpha', 'orphan-one']));
+});
+
 test('importOrphan registers an existing prompt dir', async () => {
   writeSkill('orphan-one');
   await makeStore().importOrphan({ id: 'orphan-one', cronExpression: '0 8 * * *', cwd: root, enabled: true });

@@ -90,9 +90,10 @@ async function previewCloudToLocal(sourceId, { localStore, freshTriggerVM }) {
     throw new AppError('VALIDATION', 'this one-shot routine has already fired — nothing to move');
   }
   const tasks = await localStore.readTasksRaw();
+  const takenIds = new Set([...tasks.map((t) => t.id), ...localStore.listPromptDirIds()]);
   const cronInfo = shiftedCron(vm.cronExpression, -offset);
   return {
-    suggestedId: translate.dedupeId(translate.slugify(vm.name), tasks.map((t) => t.id)),
+    suggestedId: translate.dedupeId(translate.slugify(vm.name), takenIds),
     displayName: vm.name,
     prompt: vm.prompt,
     model: vm.model,

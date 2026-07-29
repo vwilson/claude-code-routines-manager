@@ -204,6 +204,22 @@ function createLocalStore({
     }
   }
 
+  /** Refuse ids whose prompt dir already exists on disk (e.g. an orphaned SKILL.md), registry or not. */
+  function assertPromptDirAvailable(id) {
+    const skillDir = path.join(skillsDir, id);
+    if (fs.existsSync(skillDir)) {
+      throw new AppError(
+        'VALIDATION',
+        `"${skillDir}" already exists — pick a different id, or register the existing prompt from the orphan list instead of creating a new task`,
+      );
+    }
+  }
+
+  /** Basenames of every prompt dir under scheduled-tasks, registered or orphaned — for id-collision checks. */
+  function listPromptDirIds() {
+    return listSubdirs(skillsDir).map((dir) => path.basename(dir));
+  }
+
   function registryEntry({ id, cronExpression, fireAt, cwd, model, displayName, enabled }, filePath) {
     const entry = { id, enabled: Boolean(enabled), filePath, createdAt: now().getTime() };
     if (cronExpression) entry.cronExpression = cronExpression;
@@ -220,6 +236,7 @@ function createLocalStore({
       throw new AppError('CLAUDE_RUNNING', 'Claude Desktop is running — close it before creating local tasks.');
     }
     assertNewTaskId(spec.id, await readTasksRaw());
+    assertPromptDirAvailable(spec.id);
     const skillDir = path.join(skillsDir, spec.id);
     const filePath = path.join(skillDir, 'SKILL.md');
     fs.mkdirSync(skillDir, { recursive: true });
@@ -250,6 +267,7 @@ function createLocalStore({
     listTasks,
     getTask,
     readTasksRaw,
+    listPromptDirIds,
     updateTask,
     setPromptBody,
     createTask,
