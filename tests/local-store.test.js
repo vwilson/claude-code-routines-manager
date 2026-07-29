@@ -245,6 +245,22 @@ test('renameTask is blocked while Claude Desktop runs, leaving the filesystem un
   assert.equal(fs.existsSync(path.join(claudeDir, 'scheduled-tasks', 'beta')), false);
 });
 
+test('renameTask restores the original SKILL.md content if the registry write fails after the rewrite', async () => {
+  let calls = 0;
+  const store = createLocalStore({
+    appDataDir,
+    claudeDir,
+    gate: { isDesktopRunning: async () => (calls++ > 0 ? true : false) }, // false the first check, true on the retry inside mutateRegistry
+    now: () => FIXED_NOW,
+  });
+  await assert.rejects(store.renameTask('alpha', 'beta'), (err) => err.code === 'CLAUDE_RUNNING');
+  assert.equal(fs.existsSync(path.join(claudeDir, 'scheduled-tasks', 'alpha')), true);
+  assert.equal(fs.existsSync(path.join(claudeDir, 'scheduled-tasks', 'beta')), false);
+  const skill = fs.readFileSync(path.join(claudeDir, 'scheduled-tasks', 'alpha', 'SKILL.md'), 'utf8');
+  assert.match(skill, /name: alpha/);
+  assert.doesNotMatch(skill, /name: beta/);
+});
+
 test('renameTask only rewrites the name: line, preserving other frontmatter, CRLF, and body formatting', async () => {
   const filePath = path.join(claudeDir, 'scheduled-tasks', 'alpha', 'SKILL.md');
   const raw = '---\r\nname: alpha\r\ndescription: A test task\r\nextra: keep-me\r\n---\r\n\r\n  Indented body.\r\n';

@@ -205,8 +205,6 @@ async function drawerSave(form) {
   try {
     if (kind === 'local') {
       const original = data.task;
-      // Derive and validate the full edit before making any IPC call, so a bad field
-      // (e.g. an emptied cron expression) fails fast instead of after the id is already renamed.
       const newId = changedValue(form, 'id', original.id);
       const patch = {};
       const displayName = changedValue(form, 'displayName', original.displayName);
@@ -226,20 +224,15 @@ async function drawerSave(form) {
         toast('No changes to save', true);
         return;
       }
-      let currentId = original.id;
-      if (newId !== undefined) {
-        state.drawer.data = await call('localRename', { id: currentId, newId });
-        currentId = newId;
-        state.localWriteNotice = true;
-      }
-      if (Object.keys(patch).length > 0 || promptBody !== undefined) {
-        state.drawer.data = await call('localUpdate', {
-          id: currentId,
-          ...(Object.keys(patch).length > 0 && { patch }),
-          ...(promptBody !== undefined && { promptBody }),
-        });
-        if (Object.keys(patch).length > 0) state.localWriteNotice = true;
-      }
+      // One IPC call: the main process validates cron/cwd/promptBody (and the new id's
+      // format) before renaming, so a rejected field can't leave the rename committed alone.
+      state.drawer.data = await call('localUpdate', {
+        id: original.id,
+        ...(newId !== undefined && { newId }),
+        ...(Object.keys(patch).length > 0 && { patch }),
+        ...(promptBody !== undefined && { promptBody }),
+      });
+      if (newId !== undefined || Object.keys(patch).length > 0) state.localWriteNotice = true;
     } else {
       const original = data;
       const patch = {};

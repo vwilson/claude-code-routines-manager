@@ -102,24 +102,26 @@ function registerIpc({ gate, cloudApi, localStore }) {
 
   handle('local:get', ({ id }) => localStore.getTask(requireString(id, 'id')));
 
-  handle('local:update', async ({ id, patch, promptBody }) => {
+  // Validates everything up front — including the rename target — before any mutation
+  // runs, so a bad cron/cwd/promptBody can't leave an id rename committed with the
+  // rest of the edit rejected.
+  handle('local:update', async ({ id, newId, patch, promptBody }) => {
     requireString(id, 'id');
+    if (newId !== undefined) requireString(newId, 'newId', { re: translate.LOCAL_ID_RE });
     if (patch?.cronExpression !== undefined) cron.parseCron(patch.cronExpression);
     optionalBool(patch?.enabled, 'patch.enabled');
     if (patch?.cwd !== undefined) requireExistingDir(patch.cwd, 'patch.cwd');
     if (promptBody !== undefined && typeof promptBody !== 'string') {
       throw new AppError('VALIDATION', 'promptBody must be a string');
     }
-    if (promptBody !== undefined) await localStore.setPromptBody(id, promptBody);
-    if (patch && Object.keys(patch).length > 0) await localStore.updateTask(id, patch);
-    return localStore.getTask(id);
-  });
-
-  handle('local:rename', async ({ id, newId }) => {
-    requireString(id, 'id');
-    requireString(newId, 'newId', { re: translate.LOCAL_ID_RE });
-    await localStore.renameTask(id, newId);
-    return localStore.getTask(newId);
+    let currentId = id;
+    if (newId !== undefined && newId !== id) {
+      await localStore.renameTask(id, newId);
+      currentId = newId;
+    }
+    if (promptBody !== undefined) await localStore.setPromptBody(currentId, promptBody);
+    if (patch && Object.keys(patch).length > 0) await localStore.updateTask(currentId, patch);
+    return localStore.getTask(currentId);
   });
 
   handle('local:importOrphan', async ({ id, cronExpression, fireAt, cwd, model, displayName, enabled }) => {

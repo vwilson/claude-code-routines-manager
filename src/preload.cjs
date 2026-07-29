@@ -8,7 +8,6 @@ contextBridge.exposeInMainWorld('routines', {
   localList: invoke('local:list'),
   localGet: invoke('local:get'),
   localUpdate: invoke('local:update'),
-  localRename: invoke('local:rename'),
   localImportOrphan: invoke('local:importOrphan'),
   cloudList: invoke('cloud:list'),
   cloudGet: invoke('cloud:get'),

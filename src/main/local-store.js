@@ -258,10 +258,15 @@ function createLocalStore({
     const newFilePath = path.join(newDir, path.basename(task.filePath));
 
     fs.renameSync(oldDir, newDir);
+    let originalContent;
+    let contentRewritten = false;
     try {
-      const raw = fs.readFileSync(newFilePath, 'utf8');
-      const renamed = translate.renameSkillName(raw, newId);
-      if (renamed !== raw) await atomicWriteFile(newFilePath, renamed);
+      originalContent = fs.readFileSync(newFilePath, 'utf8');
+      const renamed = translate.renameSkillName(originalContent, newId);
+      if (renamed !== originalContent) {
+        await atomicWriteFile(newFilePath, renamed);
+        contentRewritten = true;
+      }
 
       await mutateRegistry((envelope) => {
         const entry = envelope.scheduledTasks.find((t) => t.id === oldId);
@@ -276,6 +281,13 @@ function createLocalStore({
         }
       });
     } catch (err) {
+      if (contentRewritten) {
+        try {
+          await atomicWriteFile(newFilePath, originalContent);
+        } catch {
+          // best effort — the directory rollback below still leaves a consistent (if renamed) prompt
+        }
+      }
       fs.renameSync(newDir, oldDir);
       throw err;
     }
