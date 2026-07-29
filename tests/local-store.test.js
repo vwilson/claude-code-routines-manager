@@ -190,3 +190,150 @@ test('setPromptBody replaces the body but keeps frontmatter', async () => {
   assert.equal(promptBody, 'New body.\n');
   assert.equal(frontmatter.description, 'A test task');
 });
+
+test('renameTask moves the prompt dir and updates the registry entry', async () => {
+  const store = makeStore();
+  const result = await store.renameTask('alpha', 'beta');
+  const expectedFilePath = path.join(claudeDir, 'scheduled-tasks', 'beta', 'SKILL.md');
+  assert.equal(result.id, 'beta');
+  assert.equal(result.filePath, expectedFilePath);
+  assert.equal(fs.existsSync(path.join(claudeDir, 'scheduled-tasks', 'alpha')), false);
+  const skill = fs.readFileSync(expectedFilePath, 'utf8');
+  assert.match(skill, /name: beta/);
+  assert.match(skill, /description: A test task/);
+  assert.match(skill, /Prompt body\./);
+  const envelope = JSON.parse(fs.readFileSync(registryPath, 'utf8'));
+  assert.equal(envelope.scheduledTasks.length, 1);
+  assert.equal(envelope.scheduledTasks[0].id, 'beta');
+  assert.equal(envelope.scheduledTasks[0].filePath, expectedFilePath);
+  assert.equal(envelope.scheduledTasks[0].cronExpression, '0 7 * * 1-5'); // unrelated fields untouched
+});
+
+test('renameTask rejects an invalid new id', async () => {
+  await assert.rejects(makeStore().renameTask('alpha', 'Bad Id!'), (err) => err.code === 'VALIDATION');
+});
+
+test('renameTask rejects a new id already used by another registry entry', async () => {
+  const betaFilePath = writeSkill('beta');
+  const envelope = JSON.parse(fs.readFileSync(registryPath, 'utf8'));
+  envelope.scheduledTasks.push({ id: 'beta', enabled: true, filePath: betaFilePath, createdAt: 1 });
+  fs.writeFileSync(registryPath, JSON.stringify(envelope, null, 2));
+  await assert.rejects(makeStore().renameTask('alpha', 'beta'), (err) => err.code === 'VALIDATION');
+});
+
+test('renameTask rejects a new id whose prompt dir already exists as an orphan', async () => {
+  writeSkill('orphan-one');
+  await assert.rejects(makeStore().renameTask('alpha', 'orphan-one'), (err) => err.code === 'VALIDATION');
+  assert.equal(fs.existsSync(path.join(claudeDir, 'scheduled-tasks', 'alpha')), true);
+});
+
+test('renameTask rejects unknown source ids with NOT_FOUND', async () => {
+  await assert.rejects(makeStore().renameTask('nope', 'whatever'), (err) => err.code === 'NOT_FOUND');
+});
+
+test('renameTask is a no-op when the id is unchanged', async () => {
+  const store = makeStore();
+  const result = await store.renameTask('alpha', 'alpha');
+  assert.equal(result.id, 'alpha');
+  assert.equal(fs.existsSync(path.join(claudeDir, 'scheduled-tasks', 'alpha', 'SKILL.md')), true);
+});
+
+test('renameTask is blocked while Claude Desktop runs, leaving the filesystem untouched', async () => {
+  gateState = true;
+  await assert.rejects(makeStore().renameTask('alpha', 'beta'), (err) => err.code === 'CLAUDE_RUNNING');
+  assert.equal(fs.existsSync(path.join(claudeDir, 'scheduled-tasks', 'alpha')), true);
+  assert.equal(fs.existsSync(path.join(claudeDir, 'scheduled-tasks', 'beta')), false);
+});
+
+test('renameTask restores the original SKILL.md content if the registry write fails after the rewrite', async () => {
+  let calls = 0;
+  const store = createLocalStore({
+    appDataDir,
+    claudeDir,
+    gate: { isDesktopRunning: async () => (calls++ > 0 ? true : false) }, // false the first check, true on the retry inside mutateRegistry
+    now: () => FIXED_NOW,
+  });
+  await assert.rejects(store.renameTask('alpha', 'beta'), (err) => err.code === 'CLAUDE_RUNNING');
+  assert.equal(fs.existsSync(path.join(claudeDir, 'scheduled-tasks', 'alpha')), true);
+  assert.equal(fs.existsSync(path.join(claudeDir, 'scheduled-tasks', 'beta')), false);
+  const skill = fs.readFileSync(path.join(claudeDir, 'scheduled-tasks', 'alpha', 'SKILL.md'), 'utf8');
+  assert.match(skill, /name: alpha/);
+  assert.doesNotMatch(skill, /name: beta/);
+});
+
+test('renameTask only rewrites the name: line, preserving other frontmatter, CRLF, and body formatting', async () => {
+  const filePath = path.join(claudeDir, 'scheduled-tasks', 'alpha', 'SKILL.md');
+  const raw = '---\r\nname: alpha\r\ndescription: A test task\r\nextra: keep-me\r\n---\r\n\r\n  Indented body.\r\n';
+  fs.writeFileSync(filePath, raw);
+  await makeStore().renameTask('alpha', 'beta');
+  const result = fs.readFileSync(path.join(claudeDir, 'scheduled-tasks', 'beta', 'SKILL.md'), 'utf8');
+  assert.equal(result, raw.replace('name: alpha', 'name: beta'));
+});
+
+test('renameTask migrates recordedSkips history to the new id', async () => {
+  await makeStore().renameTask('alpha', 'beta');
+  const envelope = JSON.parse(fs.readFileSync(registryPath, 'utf8'));
+  assert.deepEqual(envelope.recordedSkips.beta, [{ at: '2026-07-01T12:00:00Z', reason: 'asleep' }]);
+  assert.equal(Object.prototype.hasOwnProperty.call(envelope.recordedSkips, 'alpha'), false);
+});
+
+test('applyUpdate renames and patches in the same call', async () => {
+  const store = makeStore();
+  const { task, promptBody } = await store.applyUpdate('alpha', {
+    newId: 'beta',
+    patch: { displayName: 'Beta Name' },
+    promptBody: 'New body.',
+  });
+  assert.equal(task.id, 'beta');
+  assert.equal(task.displayName, 'Beta Name');
+  assert.equal(promptBody, 'New body.\n');
+  const envelope = JSON.parse(fs.readFileSync(registryPath, 'utf8'));
+  assert.equal(envelope.scheduledTasks[0].id, 'beta');
+  assert.equal(envelope.scheduledTasks[0].displayName, 'Beta Name');
+});
+
+test('applyUpdate rolls back the staged directory move if the combined registry write fails, without ever touching the registry', async () => {
+  // The id rename and the patch commit in one gated registry write; if Desktop is
+  // running, that write never happens at all — so there's nothing to undo on the
+  // registry side, only the filesystem staging (directory move + frontmatter rewrite).
+  const store = createLocalStore({
+    appDataDir,
+    claudeDir,
+    gate: { isDesktopRunning: async () => true },
+    now: () => FIXED_NOW,
+  });
+  const before = fs.readFileSync(registryPath, 'utf8');
+  await assert.rejects(
+    store.applyUpdate('alpha', { newId: 'beta', patch: { displayName: 'Beta Name' } }),
+    (err) => err.code === 'CLAUDE_RUNNING',
+  );
+  assert.equal(fs.existsSync(path.join(claudeDir, 'scheduled-tasks', 'alpha', 'SKILL.md')), true);
+  assert.equal(fs.existsSync(path.join(claudeDir, 'scheduled-tasks', 'beta')), false);
+  assert.equal(fs.readFileSync(registryPath, 'utf8'), before);
+});
+
+test('applyUpdate restores the staged prompt body and directory move together if the registry write fails', async () => {
+  const store = createLocalStore({
+    appDataDir,
+    claudeDir,
+    gate: { isDesktopRunning: async () => true },
+    now: () => FIXED_NOW,
+  });
+  await assert.rejects(
+    store.applyUpdate('alpha', {
+      newId: 'beta',
+      patch: { displayName: 'Beta Name' },
+      promptBody: 'New body that should not stick.',
+    }),
+    (err) => err.code === 'CLAUDE_RUNNING',
+  );
+  assert.equal(fs.existsSync(path.join(claudeDir, 'scheduled-tasks', 'alpha', 'SKILL.md')), true);
+  assert.equal(fs.existsSync(path.join(claudeDir, 'scheduled-tasks', 'beta')), false);
+  const skill = fs.readFileSync(path.join(claudeDir, 'scheduled-tasks', 'alpha', 'SKILL.md'), 'utf8');
+  assert.match(skill, /name: alpha/);
+  assert.match(skill, /Prompt body\./);
+  assert.doesNotMatch(skill, /New body that should not stick\./);
+  const envelope = JSON.parse(fs.readFileSync(registryPath, 'utf8'));
+  assert.equal(envelope.scheduledTasks[0].id, 'alpha');
+  assert.equal(envelope.scheduledTasks[0].displayName, undefined);
+});
