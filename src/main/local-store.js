@@ -204,15 +204,25 @@ function createLocalStore({
     }
   }
 
-  /** Refuse ids whose prompt dir already exists on disk (e.g. an orphaned SKILL.md), registry or not. */
-  function assertPromptDirAvailable(id) {
+  /**
+   * Atomically claim a brand-new prompt dir: mkdir (non-recursive, so it fails with
+   * EEXIST rather than silently succeeding) surfaces a collision — an orphaned SKILL.md,
+   * or a same-instant create from another process — as a validation error instead of a
+   * silent overwrite by the following write.
+   */
+  function claimPromptDir(id) {
+    fs.mkdirSync(skillsDir, { recursive: true });
     const skillDir = path.join(skillsDir, id);
-    if (fs.existsSync(skillDir)) {
+    try {
+      fs.mkdirSync(skillDir);
+    } catch (err) {
+      if (err.code !== 'EEXIST') throw err;
       throw new AppError(
         'VALIDATION',
         `"${skillDir}" already exists — pick a different id, or register the existing prompt from the orphan list instead of creating a new task`,
       );
     }
+    return skillDir;
   }
 
   /** Basenames of every prompt dir under scheduled-tasks, registered or orphaned — for id-collision checks. */
@@ -236,10 +246,8 @@ function createLocalStore({
       throw new AppError('CLAUDE_RUNNING', 'Claude Desktop is running — close it before creating local tasks.');
     }
     assertNewTaskId(spec.id, await readTasksRaw());
-    assertPromptDirAvailable(spec.id);
-    const skillDir = path.join(skillsDir, spec.id);
+    const skillDir = claimPromptDir(spec.id);
     const filePath = path.join(skillDir, 'SKILL.md');
-    fs.mkdirSync(skillDir, { recursive: true });
     await atomicWriteFile(filePath, translate.buildSkillMd({ name: spec.id, description, body }));
     const entry = registryEntry(spec, filePath);
     await mutateRegistry((envelope) => {
