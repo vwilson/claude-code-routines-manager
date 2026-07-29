@@ -279,11 +279,36 @@ test('duplicateTask never deletes a prompt another writer owns', async () => {
     now: () => FIXED_NOW,
   });
   const winnerSkill = writeSkill('alpha-copy', 'Winner body.');
+  // A sibling file stands in for anything else the winner put in that directory: losing
+  // the claim must not recursively delete the directory, whoever created it.
+  const sibling = path.join(claudeDir, 'scheduled-tasks', 'alpha-copy', 'notes.md');
+  fs.writeFileSync(sibling, 'winner notes');
   await assert.rejects(
     store.duplicateTask('alpha', { id: 'alpha-copy', cronExpression: '0 9 * * 1', enabled: false }),
     (err) => err.code === 'VALIDATION',
   );
   assert.match(fs.readFileSync(winnerSkill, 'utf8'), /Winner body\./);
+  assert.equal(fs.readFileSync(sibling, 'utf8'), 'winner notes');
+});
+
+test('duplicateTask rollback keeps a directory that is not empty', async () => {
+  let calls = 0;
+  const store = createLocalStore({
+    appDataDir,
+    claudeDir,
+    gate: { isDesktopRunning: async () => calls++ > 0 }, // desktop launches mid-duplicate
+    now: () => FIXED_NOW,
+  });
+  const dir = path.join(claudeDir, 'scheduled-tasks', 'alpha-copy');
+  fs.mkdirSync(dir, { recursive: true });
+  const sibling = path.join(dir, 'notes.md');
+  fs.writeFileSync(sibling, 'someone else was here');
+  await assert.rejects(
+    store.duplicateTask('alpha', { id: 'alpha-copy', cronExpression: '0 9 * * 1', enabled: false }),
+    (err) => err.code === 'CLAUDE_RUNNING',
+  );
+  assert.equal(fs.existsSync(path.join(dir, 'SKILL.md')), false); // our claim is taken back
+  assert.equal(fs.readFileSync(sibling, 'utf8'), 'someone else was here'); // theirs is not
 });
 
 test('duplicateTask is blocked while Claude Desktop runs, writing nothing', async () => {

@@ -264,7 +264,6 @@ function createLocalStore({
     }
     const skillDir = path.join(skillsDir, spec.id);
     const filePath = path.join(skillDir, 'SKILL.md');
-    const dirExisted = fs.existsSync(skillDir);
     fs.mkdirSync(skillDir, { recursive: true });
     // Claim the destination exclusively rather than testing-then-writing: this both
     // rejects an existing prompt dir and proves the rollback below owns what it deletes,
@@ -272,7 +271,11 @@ function createLocalStore({
     try {
       fs.closeSync(fs.openSync(filePath, 'wx'));
     } catch (err) {
-      if (!dirExisted) fs.rmSync(skillDir, { recursive: true, force: true });
+      // Nothing is removed on a failed claim, deliberately. Whoever holds the file may
+      // also have created the directory, and "did the dir exist before my mkdir?" is not
+      // ownership — under a concurrent duplicate that snapshot can be stale by now. An
+      // empty directory we may have just made is harmless: the orphan scan ignores dirs
+      // with no SKILL.md, and the next attempt reuses it.
       if (err.code === 'EEXIST') {
         throw new AppError('VALIDATION', `a prompt for "${spec.id}" already exists at ${filePath}`);
       }
@@ -294,9 +297,15 @@ function createLocalStore({
       });
     } catch (err) {
       // The write lost a race (desktop relaunched, id taken externally): take the prompt
-      // we claimed above back out so it does not linger as a phantom orphan. Safe to
-      // delete precisely because the exclusive create proved no one else owns it.
-      fs.rmSync(dirExisted ? filePath : skillDir, { recursive: true, force: true });
+      // back out so it does not linger as a phantom orphan. Only the file is ours to
+      // delete — the exclusive create proved that much and no more — so the directory
+      // goes only if rmdir finds it empty, which is itself the ownership check.
+      fs.rmSync(filePath, { force: true });
+      try {
+        fs.rmdirSync(skillDir);
+      } catch {
+        // not empty, or not ours — leave it alone
+      }
       throw err;
     }
     return entry;
