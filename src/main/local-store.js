@@ -246,23 +246,27 @@ function createLocalStore({
     const source = tasks.find((t) => t.id === sourceId);
     if (!source) throw new AppError('NOT_FOUND', `no local task "${sourceId}"`);
     assertNewTaskId(spec.id, tasks);
+    const skill = readSkill(source.filePath);
+    if (!skill) {
+      // An empty prompt would look like a working copy and do nothing when it fires.
+      throw new AppError('NOT_FOUND', `cannot read the prompt for "${sourceId}" at ${source.filePath} — nothing to copy`);
+    }
     const skillDir = path.join(skillsDir, spec.id);
     const filePath = path.join(skillDir, 'SKILL.md');
-    if (fs.existsSync(filePath)) {
-      throw new AppError('VALIDATION', `a prompt directory for "${spec.id}" already exists at ${skillDir}`);
-    }
-    const skill = readSkill(source.filePath);
     const dirExisted = fs.existsSync(skillDir);
     fs.mkdirSync(skillDir, { recursive: true });
-    await atomicWriteFile(
-      filePath,
-      translate.buildSkillMd({
-        name: spec.id,
-        description: skill?.frontmatter.description ?? '',
-        body: skill?.body ?? '',
-      }),
-    );
-
+    // Claim the destination exclusively rather than testing-then-writing: this both
+    // rejects an existing prompt dir and proves the rollback below owns what it deletes,
+    // even against another instance of this app duplicating to the same id.
+    try {
+      fs.closeSync(fs.openSync(filePath, 'wx'));
+    } catch (err) {
+      if (!dirExisted) fs.rmSync(skillDir, { recursive: true, force: true });
+      if (err.code === 'EEXIST') {
+        throw new AppError('VALIDATION', `a prompt for "${spec.id}" already exists at ${filePath}`);
+      }
+      throw new AppError('IO', `cannot create ${filePath}: ${err.message}`);
+    }
     // Inherit everything, then let the spec win. Fields the spec leaves blank fall back
     // to the source's; run state and the schedule the copy does not use are dropped.
     const entry = { ...source, ...registryEntry(spec, filePath) };
@@ -272,13 +276,22 @@ function createLocalStore({
     if (!spec.displayName) delete entry.displayName;
 
     try {
+      await atomicWriteFile(
+        filePath,
+        translate.buildSkillMd({
+          name: spec.id,
+          description: skill.frontmatter.description ?? '',
+          body: skill.body,
+        }),
+      );
       await mutateRegistry((envelope) => {
         assertNewTaskId(spec.id, envelope.scheduledTasks);
         envelope.scheduledTasks.push(entry);
       });
     } catch (err) {
-      // Registry write lost the race (desktop relaunched, id taken externally): take the
-      // half-written prompt back out so it does not linger as a phantom orphan.
+      // The write lost a race (desktop relaunched, id taken externally): take the prompt
+      // we claimed above back out so it does not linger as a phantom orphan. Safe to
+      // delete precisely because the exclusive create proved no one else owns it.
       fs.rmSync(dirExisted ? filePath : skillDir, { recursive: true, force: true });
       throw err;
     }

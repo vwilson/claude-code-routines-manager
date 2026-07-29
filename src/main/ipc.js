@@ -227,7 +227,10 @@ function registerIpc({ gate, cloudApi, localStore }) {
         enabled: enabled === true,
       }),
     );
-    return freshTriggerVM(created.id);
+    // Deliberately no read-back: a failed GET after a successful POST would report the
+    // whole duplication as failed, and retrying from the open dialog would create a
+    // second copy. The renderer only needs the id; the list refresh fills in the rest.
+    return translate.triggerToVM(created, environmentNamesById);
   });
 
   handle('cloud:run', async ({ id }) => {

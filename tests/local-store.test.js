@@ -258,6 +258,34 @@ test('duplicateTask refuses unknown sources, taken ids and existing prompt dirs'
   await assert.rejects(store.duplicateTask('alpha', spec), (err) => err.code === 'VALIDATION');
 });
 
+test('duplicateTask refuses a source whose prompt cannot be read', async () => {
+  fs.rmSync(path.join(claudeDir, 'scheduled-tasks', 'alpha'), { recursive: true, force: true });
+  const before = fs.readFileSync(registryPath, 'utf8');
+  await assert.rejects(
+    makeStore().duplicateTask('alpha', { id: 'alpha-copy', cronExpression: '0 9 * * 1', enabled: false }),
+    (err) => err.code === 'NOT_FOUND' && /nothing to copy/.test(err.message),
+  );
+  assert.equal(fs.readFileSync(registryPath, 'utf8'), before);
+  assert.equal(fs.existsSync(path.join(claudeDir, 'scheduled-tasks', 'alpha-copy')), false);
+});
+
+test('duplicateTask never deletes a prompt another writer owns', async () => {
+  // Stand in for a second app instance winning the race: the id is taken in the registry
+  // by the time we try to write, but the prompt on disk belongs to that winner.
+  const store = createLocalStore({
+    appDataDir,
+    claudeDir,
+    gate: { isDesktopRunning: async () => false },
+    now: () => FIXED_NOW,
+  });
+  const winnerSkill = writeSkill('alpha-copy', 'Winner body.');
+  await assert.rejects(
+    store.duplicateTask('alpha', { id: 'alpha-copy', cronExpression: '0 9 * * 1', enabled: false }),
+    (err) => err.code === 'VALIDATION',
+  );
+  assert.match(fs.readFileSync(winnerSkill, 'utf8'), /Winner body\./);
+});
+
 test('duplicateTask is blocked while Claude Desktop runs, writing nothing', async () => {
   gateState = true;
   const before = fs.readFileSync(registryPath, 'utf8');

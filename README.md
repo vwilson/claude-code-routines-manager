@@ -50,6 +50,8 @@ npm test
   minus run state, and gets its own `~\.claude\scheduled-tasks\<new-id>\SKILL.md`. A cloud
   copy reuses the source's `job_config` verbatim with fresh event uuids. Both default to
   disabled and always ask for the schedule, so a copy never silently doubles a run.
+  The local copy claims its `SKILL.md` with an exclusive create, so a concurrent
+  duplicate to the same id fails cleanly instead of two writers fighting over one file.
 
 ## Manual end-to-end verification
 

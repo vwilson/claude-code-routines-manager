@@ -401,12 +401,13 @@ function dialogActions(submitLabel) {
 /** Duplicate dialog for a local task. `task` = the LocalTaskVM being copied. */
 export function duplicateLocalDialog(task, suggestedId) {
   const oneShot = Boolean(task.fireAt) && !task.cronExpression;
+  const futureFireAt = task.fireAt && new Date(task.fireAt).getTime() > Date.now();
   return el('form', { id: 'modal-form', dataset: { kind: 'duplicate-local', sourceId: task.id } },
     el('h2', {}, `Duplicate "${task.displayName || task.id}"`),
     field('New local task id', el('input', { name: 'id', value: suggestedId, spellcheck: 'false' })),
     field('Display name', el('input', { name: 'displayName', value: `${task.displayName || task.id} (copy)` })),
     oneShot
-      ? field('One-shot (local time)', el('input', { name: 'fireAt', type: 'datetime-local', value: toDatetimeLocalValue(task.fireAt) }))
+      ? field('One-shot (local time)', el('input', { name: 'fireAt', type: 'datetime-local', value: futureFireAt ? toDatetimeLocalValue(task.fireAt) : '' }))
       : cronField('cronExpression', task.cronExpression, { utc: false }),
     field(
       'Working directory',
@@ -424,6 +425,7 @@ export function duplicateLocalDialog(task, suggestedId) {
       { class: 'warnings' },
       el('li', {}, 'the prompt is copied as it is on disk now — later edits to either copy are independent'),
       el('li', {}, 'Claude Desktop must be restarted before it schedules the copy'),
+      oneShot && !futureFireAt ? el('li', {}, 'the original has already fired — pick a future time for the copy') : null,
     ),
     el('div', { class: 'form-error', dataset: { formError: '' } }),
     dialogActions('Duplicate'),
@@ -451,6 +453,7 @@ export function duplicateCloudDialog(trigger) {
       'ul',
       { class: 'warnings' },
       el('li', {}, 'environment, repository, model, allowed tools and prompt are copied — edit them on the copy afterwards'),
+      el('li', {}, 'notification settings are not copied'),
       trigger.mcpConnections.length > 0
         ? el('li', {}, `${trigger.mcpConnections.length} MCP connection(s) are not copied`)
         : null,

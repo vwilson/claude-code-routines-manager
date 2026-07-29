@@ -296,7 +296,10 @@ async function openMoveDialog(direction, sourceId) {
   form.querySelectorAll('[data-cron-preview]').forEach((input) => updateCronPreview(input));
 }
 
-/** "alpha" -> "alpha-copy", then "alpha-copy-2", … against the ids already in the registry. */
+/**
+ * "alpha" -> "alpha-copy", then "alpha-copy-2", … Orphans count as taken too: their
+ * prompt dir already occupies the id, so the store would reject it on submit.
+ */
 function suggestCopyId(sourceId, existingIds) {
   const taken = new Set(existingIds);
   const base = `${sourceId}-copy`;
@@ -310,9 +313,11 @@ async function openDuplicateDialog(kind, id) {
   const modal = $('#modal');
   if (kind === 'local') {
     const { task } = await call('localGet', { id });
-    modal.replaceChildren(
-      ui.duplicateLocalDialog(task, suggestCopyId(task.id, (state.local?.tasks ?? []).map((t) => t.id))),
-    );
+    const taken = [
+      ...(state.local?.tasks ?? []).map((t) => t.id),
+      ...(state.local?.orphans ?? []).map((o) => o.id),
+    ];
+    modal.replaceChildren(ui.duplicateLocalDialog(task, suggestCopyId(task.id, taken)));
   } else {
     modal.replaceChildren(ui.duplicateCloudDialog(await call('cloudGet', { id })));
   }
