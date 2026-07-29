@@ -183,15 +183,22 @@ test('createTask refuses to overwrite an existing orphaned SKILL.md', async () =
   assert.ok(!envelope.scheduledTasks.some((t) => t.id === 'collision'));
 });
 
-test('createTask refuses an id whose prompt dir exists even without a SKILL.md', async () => {
-  const dir = path.join(claudeDir, 'scheduled-tasks', 'empty-dir');
+test('createTask reclaims a pre-existing dir that has no SKILL.md, e.g. left by a crashed claim', async () => {
+  const dir = path.join(claudeDir, 'scheduled-tasks', 'crashed-claim');
   fs.mkdirSync(dir, { recursive: true });
+  // A leftover temp file from an atomicWriteFile() that never got to rename — the
+  // process could have been killed right after claimPromptDir() succeeded.
+  fs.writeFileSync(path.join(dir, '.SKILL.md.tmp-1234-0'), 'partial');
   const store = makeStore();
-  await assert.rejects(
-    store.createTask({ id: 'empty-dir', cronExpression: '0 9 * * *', enabled: false }, { description: '', body: 'x' }),
-    (err) => err.code === 'VALIDATION',
+  const entry = await store.createTask(
+    { id: 'crashed-claim', cronExpression: '0 9 * * *', enabled: false },
+    { description: 'recovered', body: 'recovered body' },
   );
-  assert.deepEqual(fs.readdirSync(dir), []);
+  const skill = fs.readFileSync(entry.filePath, 'utf8');
+  assert.match(skill, /description: recovered/);
+  assert.match(skill, /recovered body/);
+  // The stale leftover must not survive the reclaim.
+  assert.deepEqual(fs.readdirSync(dir), ['SKILL.md']);
 });
 
 test('createTask removes the claimed dir if the SKILL.md write itself never lands', async () => {

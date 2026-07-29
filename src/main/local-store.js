@@ -208,21 +208,35 @@ function createLocalStore({
    * Atomically claim a brand-new prompt dir: mkdir (non-recursive, so it fails with
    * EEXIST rather than silently succeeding) surfaces a collision — an orphaned SKILL.md,
    * or a same-instant create from another process — as a validation error instead of a
-   * silent overwrite by the following write.
+   * silent overwrite by the following write. A dir that exists but has no SKILL.md can't
+   * be a real orphan or registered task (both require one), so it's either brand new or
+   * left behind by a claim whose write never landed — e.g. the process was killed between
+   * this claim and atomicWriteFile(). There's nothing there to lose, so it's reclaimed
+   * rather than left permanently blocking the id.
    */
   function claimPromptDir(id) {
     fs.mkdirSync(skillsDir, { recursive: true });
     const skillDir = path.join(skillsDir, id);
+    const claim = () => fs.mkdirSync(skillDir);
     try {
-      fs.mkdirSync(skillDir);
+      claim();
+      return skillDir;
     } catch (err) {
       if (err.code !== 'EEXIST') throw err;
-      throw new AppError(
-        'VALIDATION',
-        `"${skillDir}" already exists — pick a different id, or register the existing prompt from the orphan list instead of creating a new task`,
-      );
     }
-    return skillDir;
+    if (!fs.existsSync(path.join(skillDir, 'SKILL.md'))) {
+      fs.rmSync(skillDir, { recursive: true, force: true });
+      try {
+        claim();
+        return skillDir;
+      } catch (err) {
+        if (err.code !== 'EEXIST') throw err;
+      }
+    }
+    throw new AppError(
+      'VALIDATION',
+      `"${skillDir}" already exists — pick a different id, or register the existing prompt from the orphan list instead of creating a new task`,
+    );
   }
 
   /** Basenames of every prompt dir under scheduled-tasks, registered or orphaned — for id-collision checks. */
