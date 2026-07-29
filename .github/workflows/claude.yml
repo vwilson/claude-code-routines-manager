@@ -8,7 +8,7 @@ on:
   pull_request_review:
     types: [submitted]
   issues:
-    types: [opened, assigned]
+    types: [opened]
 
 jobs:
   claude:
@@ -37,5 +37,7 @@ jobs:
         with:
           # Subscription auth (Pro/Max) — not an Anthropic API key.
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Quoted: the value is split shell-style, so the spaces inside each
+          # Bash(...) pattern would otherwise break the rules apart.
           claude_args: |
-            --allowed-tools Bash(npm ci),Bash(npm test),Bash(npm run *)
+            --allowed-tools "Bash(npm ci),Bash(npm test),Bash(npm run *)"
