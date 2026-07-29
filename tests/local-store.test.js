@@ -194,23 +194,52 @@ test('createTask refuses an id whose prompt dir exists even without a SKILL.md',
   assert.deepEqual(fs.readdirSync(dir), []);
 });
 
-test('createTask rolls back the claimed prompt dir when the registry write fails', async () => {
+test('createTask removes the claimed dir if the SKILL.md write itself never lands', async () => {
+  const store = makeStore();
+  const originalOpenSync = fs.openSync;
+  fs.openSync = () => {
+    throw new Error('simulated disk failure');
+  };
+  try {
+    await assert.rejects(
+      store.createTask({ id: 'write-fails', cronExpression: '0 9 * * *', enabled: false }, { description: '', body: 'x' }),
+      /simulated disk failure/,
+    );
+  } finally {
+    fs.openSync = originalOpenSync;
+  }
+  // Nothing was ever published, so the claim is safely undone: the id is retryable
+  // and there's no stray empty dir left over.
+  assert.equal(fs.existsSync(path.join(claudeDir, 'scheduled-tasks', 'write-fails')), false);
+});
+
+test('createTask leaves a published SKILL.md as a recoverable orphan when the registry write fails afterward', async () => {
   let gateCalls = 0;
   const store = createLocalStore({
     appDataDir,
     claudeDir,
     // false for createTask's own upfront check, true for mutateRegistry's — simulates
-    // Claude Desktop starting up in the gap between the two gate checks.
+    // Claude Desktop starting up in the gap between the two gate checks, i.e. after
+    // SKILL.md has already been durably written.
     gate: { isDesktopRunning: async () => (gateCalls += 1) > 1 },
     now: () => FIXED_NOW,
   });
   await assert.rejects(
-    store.createTask({ id: 'rollback-me', cronExpression: '0 9 * * *', enabled: false }, { description: '', body: 'x' }),
+    store.createTask(
+      { id: 'orphaned-by-failure', cronExpression: '0 9 * * *', enabled: false },
+      { description: 'desc', body: 'body text' },
+    ),
     (err) => err.code === 'CLAUDE_RUNNING',
   );
-  assert.equal(fs.existsSync(path.join(claudeDir, 'scheduled-tasks', 'rollback-me')), false);
+  // The prompt itself must survive — deleting it here would race against another
+  // process that might import this exact orphan in the same window. It's not
+  // registered, but it IS visible and recoverable through the orphan-import flow.
+  const filePath = path.join(claudeDir, 'scheduled-tasks', 'orphaned-by-failure', 'SKILL.md');
+  assert.ok(fs.existsSync(filePath));
   const envelope = JSON.parse(fs.readFileSync(registryPath, 'utf8'));
-  assert.ok(!envelope.scheduledTasks.some((t) => t.id === 'rollback-me'));
+  assert.ok(!envelope.scheduledTasks.some((t) => t.id === 'orphaned-by-failure'));
+  const { orphans } = await store.listTasks();
+  assert.ok(orphans.some((o) => o.id === 'orphaned-by-failure'));
 });
 
 test('createTask does not delete a dir another process registered in the same race window', async () => {

@@ -247,30 +247,27 @@ function createLocalStore({
     }
     assertNewTaskId(spec.id, await readTasksRaw());
     const skillDir = claimPromptDir(spec.id);
+    const filePath = path.join(skillDir, 'SKILL.md');
     try {
-      const filePath = path.join(skillDir, 'SKILL.md');
       await atomicWriteFile(filePath, translate.buildSkillMd({ name: spec.id, description, body }));
-      const entry = registryEntry(spec, filePath);
-      await mutateRegistry((envelope) => {
-        assertNewTaskId(spec.id, envelope.scheduledTasks);
-        envelope.scheduledTasks.push(entry);
-      });
-      return entry;
     } catch (err) {
-      // Undo the claim so the id is retryable and doesn't linger as an unrecoverable stray
-      // dir — but only if nothing else has since registered it: another process could have
-      // imported this exact SKILL.md as an orphan in the gap before our own registry write,
-      // in which case deleting it would destroy that process's now-registered task. When we
-      // can't tell (e.g. the registry is unreadable), be conservative and leave the dir alone.
-      let claimedByOther = true;
-      try {
-        claimedByOther = (await readTasksRaw()).some((t) => t.id === spec.id);
-      } catch {
-        // unknown state — assume claimed, skip the delete
-      }
-      if (!claimedByOther) fs.rmSync(skillDir, { recursive: true, force: true });
+      // Nothing durable was published yet, so the claim is still safely ours to undo —
+      // this keeps the id retryable instead of leaving a stray empty dir behind.
+      fs.rmSync(skillDir, { recursive: true, force: true });
       throw err;
     }
+    // SKILL.md now exists on disk and is visible to scanOrphans. From here on we never
+    // delete it on failure: another process could concurrently import this exact orphan,
+    // and re-checking the registry immediately before a delete would still race against
+    // that process's commit. If our own registry write below fails for any reason —
+    // including losing that race — the file is left as a recoverable orphan rather than
+    // destroyed, importable again via importOrphan()/the "Register…" UI flow.
+    const entry = registryEntry(spec, filePath);
+    await mutateRegistry((envelope) => {
+      assertNewTaskId(spec.id, envelope.scheduledTasks);
+      envelope.scheduledTasks.push(entry);
+    });
+    return entry;
   }
 
   /** Re-register an orphaned prompt dir as a scheduled task (SKILL.md must already exist). */
