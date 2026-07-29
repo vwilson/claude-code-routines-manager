@@ -76,6 +76,17 @@ button.link {
   text-decoration: underline;
 }
 
+button.icon-btn {
+  padding: 0.1rem 0.45rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+
+button.icon-btn:hover {
+  color: var(--accent);
+}
+
 input,
 select,
 textarea {

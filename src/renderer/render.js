@@ -103,6 +103,16 @@ export function cloudTriggerRow(trigger) {
       el('div', { class: 'row-sub' }, scheduleText({ ...trigger, zone: 'utc' })),
     ),
     el('div', { class: 'badges' }, badges),
+    el(
+      'button',
+      {
+        type: 'button',
+        class: 'icon-btn',
+        title: 'Open at claude.ai',
+        dataset: { action: 'open-url', url: `https://claude.ai/code/routines/${trigger.id}` },
+      },
+      '↗',
+    ),
   );
 }
 
@@ -248,6 +258,15 @@ export function cloudDrawer(trigger, environments) {
         el('button', { type: 'submit', class: 'primary' }, 'Save'),
         el('button', { type: 'button', dataset: { action: 'run-cloud', id: trigger.id } }, 'Run now'),
         el('button', { type: 'button', dataset: { action: 'move-start', direction: 'c2l', id: trigger.id } }, 'Move to Local…'),
+        el(
+          'button',
+          {
+            type: 'button',
+            class: 'link',
+            dataset: { action: 'open-url', url: `https://claude.ai/code/routines/${trigger.id}` },
+          },
+          'Open at claude.ai ↗',
+        ),
       ),
     ),
   );
