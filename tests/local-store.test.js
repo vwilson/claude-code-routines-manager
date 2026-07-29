@@ -194,6 +194,25 @@ test('createTask refuses an id whose prompt dir exists even without a SKILL.md',
   assert.deepEqual(fs.readdirSync(dir), []);
 });
 
+test('createTask rolls back the claimed prompt dir when the registry write fails', async () => {
+  let gateCalls = 0;
+  const store = createLocalStore({
+    appDataDir,
+    claudeDir,
+    // false for createTask's own upfront check, true for mutateRegistry's — simulates
+    // Claude Desktop starting up in the gap between the two gate checks.
+    gate: { isDesktopRunning: async () => (gateCalls += 1) > 1 },
+    now: () => FIXED_NOW,
+  });
+  await assert.rejects(
+    store.createTask({ id: 'rollback-me', cronExpression: '0 9 * * *', enabled: false }, { description: '', body: 'x' }),
+    (err) => err.code === 'CLAUDE_RUNNING',
+  );
+  assert.equal(fs.existsSync(path.join(claudeDir, 'scheduled-tasks', 'rollback-me')), false);
+  const envelope = JSON.parse(fs.readFileSync(registryPath, 'utf8'));
+  assert.ok(!envelope.scheduledTasks.some((t) => t.id === 'rollback-me'));
+});
+
 test('listPromptDirIds includes both registered and orphaned prompt dirs', async () => {
   writeSkill('orphan-one');
   const store = makeStore();

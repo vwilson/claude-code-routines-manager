@@ -247,14 +247,20 @@ function createLocalStore({
     }
     assertNewTaskId(spec.id, await readTasksRaw());
     const skillDir = claimPromptDir(spec.id);
-    const filePath = path.join(skillDir, 'SKILL.md');
-    await atomicWriteFile(filePath, translate.buildSkillMd({ name: spec.id, description, body }));
-    const entry = registryEntry(spec, filePath);
-    await mutateRegistry((envelope) => {
-      assertNewTaskId(spec.id, envelope.scheduledTasks);
-      envelope.scheduledTasks.push(entry);
-    });
-    return entry;
+    try {
+      const filePath = path.join(skillDir, 'SKILL.md');
+      await atomicWriteFile(filePath, translate.buildSkillMd({ name: spec.id, description, body }));
+      const entry = registryEntry(spec, filePath);
+      await mutateRegistry((envelope) => {
+        assertNewTaskId(spec.id, envelope.scheduledTasks);
+        envelope.scheduledTasks.push(entry);
+      });
+      return entry;
+    } catch (err) {
+      // Undo the claim so the id is retryable and doesn't linger as an unrecoverable stray dir.
+      fs.rmSync(skillDir, { recursive: true, force: true });
+      throw err;
+    }
   }
 
   /** Re-register an orphaned prompt dir as a scheduled task (SKILL.md must already exist). */
