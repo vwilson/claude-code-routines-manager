@@ -38,8 +38,22 @@ function isProcessAlive(pid) {
   }
 }
 
+/**
+ * Publish `markerPath` with our pid, atomically: the content is written in full to a
+ * private temp file first, then linked into place. link() is atomic and fails EEXIST
+ * if the destination already exists, but — unlike writing directly with {flag:'wx'} —
+ * markerPath never becomes visible to another process until its content already is
+ * complete, so a reader can never observe it as created-but-still-empty (or partially
+ * written) and mistake that for a corrupt, abandoned marker.
+ */
 function writeMarkerFile(markerPath) {
-  fs.writeFileSync(markerPath, JSON.stringify({ pid: process.pid, at: new Date().toISOString() }), { flag: 'wx' });
+  const tmp = `${markerPath}.tmp-${process.pid}-${Date.now()}`;
+  fs.writeFileSync(tmp, JSON.stringify({ pid: process.pid, at: new Date().toISOString() }));
+  try {
+    fs.linkSync(tmp, markerPath);
+  } finally {
+    fs.rmSync(tmp, { force: true });
+  }
 }
 
 /**
@@ -75,16 +89,29 @@ function acquireTakeoverLock(lockPath) {
   try {
     ageMs = Date.now() - fs.statSync(lockPath).mtimeMs;
   } catch {
-    ageMs = Infinity; // gone already — safe to (re)claim
+    ageMs = Infinity; // gone already — try again below
   }
   if (ageMs <= TAKEOVER_LOCK_STALE_MS) return false;
-  fs.rmSync(lockPath, { force: true });
+
+  // Reclaiming a stale lock must itself be atomic: two processes could both stat the
+  // same stale lock and both decide to reclaim it before either acts. Renaming it away
+  // is what actually decides ownership of that specific stale instance, not a separate
+  // stat-then-delete — rename() can only ever be won by one process for a given source
+  // path before it's gone, so at most one process proceeds past this point for it.
+  const retired = `${lockPath}.retired-${process.pid}-${Date.now()}`;
+  try {
+    fs.renameSync(lockPath, retired);
+  } catch (err) {
+    if (err.code === 'ENOENT') return false; // someone else already claimed/removed it
+    throw err;
+  }
+  fs.rmSync(retired, { force: true });
   try {
     write();
     return true;
   } catch (err) {
     if (err.code !== 'EEXIST') throw err;
-    return false; // someone else reclaimed it in the same instant
+    return false; // a fresh lock landed in the same instant
   }
 }
 

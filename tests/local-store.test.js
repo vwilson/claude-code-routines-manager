@@ -166,6 +166,16 @@ test('createTask writes SKILL.md and a registry entry', async () => {
   assert.match(skill, /Cloud prompt body\./);
 });
 
+test('createTask leaves no marker temp file behind after a normal claim', async () => {
+  // writeMarkerFile() publishes via write-to-temp-then-link rather than a direct
+  // {flag:'wx'} write, specifically so the final marker name never becomes visible
+  // before its content is complete. The temp file must not survive either way.
+  const store = makeStore();
+  await store.createTask({ id: 'temp-cleanup', cronExpression: '0 9 * * *', enabled: false }, { description: '', body: 'x' });
+  const dir = path.join(claudeDir, 'scheduled-tasks', 'temp-cleanup');
+  assert.deepEqual(fs.readdirSync(dir), ['SKILL.md']);
+});
+
 test('createTask rejects invalid and duplicate ids', async () => {
   const store = makeStore();
   await assert.rejects(
