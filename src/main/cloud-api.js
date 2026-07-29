@@ -63,21 +63,24 @@ function createCloudApi({ oauth, fetchImpl = fetch } = {}) {
 
   const triggers = (subPath = '') => `/v1/code/triggers${subPath}`;
 
+  // Single-trigger endpoints wrap the object: { trigger: {...} }.
+  const unwrapTrigger = (data) => data.trigger ?? data;
+
   async function listTriggers() {
     const data = await request('GET', triggers(), { beta: TRIGGERS_BETA });
     return { triggers: data.data ?? [], hasMore: Boolean(data.has_more) };
   }
 
-  function getTrigger(id) {
-    return request('GET', triggers(`/${id}`), { beta: TRIGGERS_BETA });
+  async function getTrigger(id) {
+    return unwrapTrigger(await request('GET', triggers(`/${id}`), { beta: TRIGGERS_BETA }));
   }
 
-  function createTrigger(body) {
-    return request('POST', triggers(), { body, beta: TRIGGERS_BETA });
+  async function createTrigger(body) {
+    return unwrapTrigger(await request('POST', triggers(), { body, beta: TRIGGERS_BETA }));
   }
 
-  function updateTrigger(id, body) {
-    return request('POST', triggers(`/${id}`), { body, beta: TRIGGERS_BETA });
+  async function updateTrigger(id, body) {
+    return unwrapTrigger(await request('POST', triggers(`/${id}`), { body, beta: TRIGGERS_BETA }));
   }
 
   function runTrigger(id) {

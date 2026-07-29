@@ -139,7 +139,7 @@ function kvList(pairs) {
   );
 }
 
-export function field(labelText, control, extra) {
+function field(labelText, control, extra) {
   return el('div', { class: 'field' }, el('label', {}, labelText), control, extra);
 }
 

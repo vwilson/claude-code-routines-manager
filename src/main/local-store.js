@@ -78,13 +78,17 @@ function createLocalStore({
     return (await readEnvelope(registryPath)).scheduledTasks;
   }
 
-  function readSkillMeta(filePath) {
+  function readSkill(filePath) {
     try {
-      const { frontmatter } = translate.parseSkillMd(fs.readFileSync(filePath, 'utf8'));
-      return { description: frontmatter.description, skillMissing: false };
+      return translate.parseSkillMd(fs.readFileSync(filePath, 'utf8'));
     } catch {
-      return { description: undefined, skillMissing: true };
+      return null;
     }
+  }
+
+  function readSkillMeta(filePath) {
+    const skill = readSkill(filePath);
+    return { description: skill?.frontmatter.description, skillMissing: skill === null };
   }
 
   async function listTasks() {
@@ -126,22 +130,18 @@ function createLocalStore({
     return orphans.sort((a, b) => (a.mtime < b.mtime ? 1 : -1));
   }
 
-  function readSkill(filePath) {
-    try {
-      return translate.parseSkillMd(fs.readFileSync(filePath, 'utf8'));
-    } catch {
-      return null;
-    }
-  }
-
   async function getTask(id) {
     const tasks = await readTasksRaw();
     const task = tasks.find((t) => t.id === id);
     if (!task) throw new AppError('NOT_FOUND', `no local task "${id}"`);
     const skill = readSkill(task.filePath);
-    const { description, skillMissing } = readSkillMeta(task.filePath);
     return {
-      task: translate.localTaskToVM(task, { description, skillMissing, skips: 0, now: now() }),
+      task: translate.localTaskToVM(task, {
+        description: skill?.frontmatter.description,
+        skillMissing: skill === null,
+        skips: 0,
+        now: now(),
+      }),
       promptBody: skill?.body ?? '',
       frontmatter: skill?.frontmatter ?? { name: undefined, description: undefined },
     };
