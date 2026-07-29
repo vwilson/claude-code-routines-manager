@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta
+    http-equiv="Content-Security-Policy"
+    content="default-src 'none'; style-src 'self'; script-src 'self'; img-src 'self' data:"
+  />
+  <title>Claude Code Routines</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header>
+    <h1>Claude Code Routines</h1>
+    <span id="chip-desktop" class="chip">Desktop: checking…</span>
+    <span id="chip-cloud" class="chip">Cloud: loading…</span>
+    <span class="spacer"></span>
+    <span id="last-refreshed" class="muted"></span>
+    <button type="button" data-action="refresh">Refresh</button>
+  </header>
+
+  <div id="banners"></div>
+
+  <main>
+    <section class="pane">
+      <div class="pane-head">
+        <h2>Local tasks</h2>
+        <span id="local-subtitle" class="muted"></span>
+      </div>
+      <div id="local-list" class="rows"></div>
+      <details>
+        <summary>Orphaned prompts (<span id="orphan-count">0</span>)</summary>
+        <div id="orphan-list" class="rows"></div>
+      </details>
+    </section>
+
+    <section class="pane">
+      <div class="pane-head">
+        <h2>Cloud routines</h2>
+        <span id="cloud-subtitle" class="muted"></span>
+      </div>
+      <div id="cloud-list" class="rows"></div>
+      <p class="footer-note">
+        <button type="button" class="link" data-action="open-url" data-url="https://claude.ai/code/routines">
+          Delete routines at claude.ai/code/routines
+        </button>
+      </p>
+    </section>
+  </main>
+
+  <aside id="drawer" hidden></aside>
+  <dialog id="modal"></dialog>
+  <div id="toasts"></div>
+
+  <datalist id="models">
+    <option value="claude-fable-5"></option>
+    <option value="claude-opus-5"></option>
+    <option value="claude-sonnet-5"></option>
+    <option value="claude-haiku-4-5-20251001"></option>
+  </datalist>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
