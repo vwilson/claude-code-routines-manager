@@ -178,7 +178,9 @@ function renderDrawer() {
   }
   drawer.hidden = false;
   drawer.replaceChildren(
-    state.drawer.kind === 'local' ? ui.localDrawer(state.drawer.data) : ui.cloudDrawer(state.drawer.data),
+    state.drawer.kind === 'local'
+      ? ui.localDrawer(state.drawer.data)
+      : ui.cloudDrawer(state.drawer.data, state.cloud?.environments ?? []),
   );
   drawer.querySelectorAll('[data-cron-preview]').forEach((input) => updateCronPreview(input));
 }
@@ -230,9 +232,9 @@ async function drawerSave(form) {
     } else {
       const original = data;
       const patch = {};
-      for (const name of ['name', 'cronExpression', 'model']) {
+      for (const name of ['name', 'cronExpression', 'model', 'environmentId']) {
         const value = changedValue(form, name, original[name]);
-        if (value) patch[name === 'name' ? 'name' : name] = value;
+        if (value) patch[name] = value;
       }
       const promptInput = form.elements.prompt;
       if (promptInput.value !== original.prompt) patch.prompt = promptInput.value;

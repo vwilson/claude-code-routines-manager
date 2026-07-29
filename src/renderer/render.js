@@ -203,8 +203,19 @@ export function localDrawer({ task, promptBody }) {
   );
 }
 
+function environmentSelect(name, environments, currentId) {
+  const options = environments.map((e) => e.id).includes(currentId)
+    ? environments
+    : [...environments, { id: currentId, name: currentId }]; // stale/unknown env still selectable
+  return el(
+    'select',
+    { name },
+    options.map((e) => el('option', { value: e.id, selected: e.id === currentId }, e.name)),
+  );
+}
+
 /** Drawer for a cloud trigger. `data` = TriggerVM. */
-export function cloudDrawer(trigger) {
+export function cloudDrawer(trigger, environments) {
   return el(
     'div',
     {},
@@ -216,7 +227,6 @@ export function cloudDrawer(trigger) {
     ),
     kvList([
       ['id', trigger.id],
-      ['environment', trigger.environmentName ?? trigger.environmentId],
       ['repo', trigger.repoUrl],
       ['allowed tools', trigger.allowedTools.join(', ')],
       ['MCP', trigger.mcpConnections.map((c) => c.name).join(', ')],
@@ -228,6 +238,7 @@ export function cloudDrawer(trigger) {
     el('form', { id: 'drawer-form' },
       field('Name', el('input', { name: 'name', value: trigger.name ?? '' })),
       trigger.cronExpression ? cronField('cronExpression', trigger.cronExpression, { utc: true }) : null,
+      field('Environment', environmentSelect('environmentId', environments, trigger.environmentId)),
       field('Model', el('input', { name: 'model', value: trigger.model ?? '', list: 'models' })),
       field('Prompt', el('textarea', { name: 'prompt' }, trigger.prompt)),
       el('div', { class: 'form-error' }),

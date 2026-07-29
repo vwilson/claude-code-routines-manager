@@ -157,20 +157,24 @@ function registerIpc({ gate, cloudApi, localStore }) {
       if (problem) throw new AppError('VALIDATION', problem);
       body.cron_expression = patch.cronExpression;
     }
-    if (patch.prompt !== undefined || patch.model !== undefined) {
+    if (patch.prompt !== undefined || patch.model !== undefined || patch.environmentId !== undefined) {
       // Nested partial updates are not trusted: splice into the full, fresh job_config.
       const fresh = await cloudApi.getTrigger(id);
       const jobConfig = fresh.job_config;
-      const message = jobConfig?.ccr?.events?.[0]?.data?.message;
+      if (!jobConfig?.ccr) throw new AppError('VALIDATION', 'this trigger has no editable job config');
+      const message = jobConfig.ccr.events?.[0]?.data?.message;
       if (patch.prompt !== undefined) {
         if (!message) throw new AppError('VALIDATION', 'this trigger has no editable prompt event');
         message.content = requireString(patch.prompt, 'patch.prompt');
       }
       if (patch.model !== undefined) {
-        if (!jobConfig?.ccr?.session_context) {
+        if (!jobConfig.ccr.session_context) {
           throw new AppError('VALIDATION', 'this trigger has no session_context to set a model on');
         }
         jobConfig.ccr.session_context.model = requireString(patch.model, 'patch.model');
+      }
+      if (patch.environmentId !== undefined) {
+        jobConfig.ccr.environment_id = requireString(patch.environmentId, 'patch.environmentId');
       }
       body.job_config = jobConfig;
     }
