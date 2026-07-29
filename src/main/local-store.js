@@ -13,7 +13,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { AppError } = require('./errors');
-const { atomicWriteFile, readJsonWithRetry } = require('./fsx');
+const { atomicWriteFile, readJsonWithRetry, sleep } = require('./fsx');
 const translate = require('./translate');
 
 const PATCHABLE_FIELDS = ['displayName', 'cronExpression', 'model', 'cwd', 'enabled'];
@@ -23,10 +23,13 @@ const PATCHABLE_FIELDS = ['displayName', 'cronExpression', 'model', 'cwd', 'enab
 // plausible manual user action, would ever create a file with this exact name.
 const CLAIM_MARKER = '.claim.json';
 
-// The takeover lock's own critical section below (read a marker, check a pid, maybe
-// rm+rewrite) is a handful of synchronous fs calls — never legitimately slower than
-// this, so anything older can only be a leftover from a process that died mid-section.
-const TAKEOVER_LOCK_STALE_MS = 10_000;
+// Matches every temp artifact our own write protocols can leave behind for a given id:
+// claimMarkerExclusively()'s own tmp/retired files, and atomicWriteFile()'s tmp file for
+// SKILL.md itself (fsx.js names it `.${basename}.tmp-${pid}-${timestamp}`). Nothing else
+// could ever produce a name in this shape, so any entry that matches is provably either
+// ours or another live attempt's to reason about — never an unrelated stranger's —
+// without needing to read its content, just its embedded pid (capture group 1).
+const PROTOCOL_ARTIFACT_RE = /^\.(?:claim\.json\.(?:tmp|retired)|SKILL\.md\.tmp)-(\d+)-\d+$/;
 
 /** True if `pid` names a currently-running process (best-effort; assumes alive when unsure). */
 function isProcessAlive(pid) {
@@ -39,110 +42,89 @@ function isProcessAlive(pid) {
 }
 
 /**
- * Publish `markerPath` with our pid, atomically: the content is written in full to a
- * private temp file first, then linked into place. link() is atomic and fails EEXIST
- * if the destination already exists, but — unlike writing directly with {flag:'wx'} —
- * markerPath never becomes visible to another process until its content already is
- * complete, so a reader can never observe it as created-but-still-empty (or partially
- * written) and mistake that for a corrupt, abandoned marker.
+ * Publish `targetPath` with `payload` (JSON), atomically: the content is written in
+ * full to a private temp file first, then linked into place. link() is atomic and fails
+ * EEXIST if the destination already exists, but — unlike writing directly with
+ * {flag:'wx'} — targetPath never becomes visible to another process until its content
+ * already is complete, so a reader can never observe it as created-but-still-empty (or
+ * partially written) and mistake that for corruption.
  */
-function writeMarkerFile(markerPath) {
-  const tmp = `${markerPath}.tmp-${process.pid}-${Date.now()}`;
-  fs.writeFileSync(tmp, JSON.stringify({ pid: process.pid, at: new Date().toISOString() }));
+function publishAtomically(targetPath, payload) {
+  const tmp = `${targetPath}.tmp-${process.pid}-${Date.now()}`;
+  fs.writeFileSync(tmp, JSON.stringify(payload));
   try {
-    fs.linkSync(tmp, markerPath);
+    fs.linkSync(tmp, targetPath);
   } finally {
     fs.rmSync(tmp, { force: true });
   }
 }
 
 /**
- * True if the marker at `markerPath` can be proven abandoned: a readable pid that's
- * confirmed no longer running, OR the marker being unreadable/corrupt/gone entirely —
- * which can only happen if a write to it was interrupted mid-flight (our own writes are
- * always a single complete JSON payload), meaning its writer is necessarily gone too.
+ * True if the claim at `markerPath` can be proven abandoned: a readable, valid pid
+ * that's confirmed no longer running. A transient read failure (e.g. antivirus briefly
+ * locking a freshly-written file on Windows, same as atomicWriteFile() already works
+ * around) is retried a few times before giving up. A missing marker (ENOENT — its owner
+ * already cleaned it up after finishing; claimPromptDir()'s own SKILL.md re-check covers
+ * that case) counts as abandoned. Anything else unreadable, or unparseable, fails
+ * closed — refusing to treat what we can't verify as proof of anything, since its owner
+ * might still be alive.
  */
-function isMarkerAbandoned(markerPath) {
+async function isMarkerAbandoned(markerPath) {
+  let raw;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      raw = fs.readFileSync(markerPath, 'utf8');
+      break;
+    } catch (err) {
+      if (err.code === 'ENOENT') return true;
+      if (attempt >= 3 || (err.code !== 'EPERM' && err.code !== 'EBUSY')) return false;
+      await sleep(100);
+    }
+  }
   let marker;
   try {
-    marker = JSON.parse(fs.readFileSync(markerPath, 'utf8'));
+    marker = JSON.parse(raw);
   } catch {
-    return true;
+    return false; // corrupt content — can't verify, don't guess
   }
-  return typeof marker.pid !== 'number' || !isProcessAlive(marker.pid);
+  return typeof marker.pid === 'number' && !isProcessAlive(marker.pid);
 }
 
 /**
- * Acquire `lockPath` exclusively for this process, taking over one left behind by a
- * crash if it's stale enough that it can only be abandoned (see TAKEOVER_LOCK_STALE_MS).
- * Returns false if someone else currently — and plausibly still legitimately — holds it.
+ * Exclusively claim `markerPath` for this process, taking over an existing one if
+ * isMarkerAbandoned() proves it's abandoned. Returns true if we now own it, false if
+ * someone else does and it's still alive (or unverifiable).
+ *
+ * A plain "verify abandoned, then delete and replace" is itself a race: two processes
+ * could both verify the same dead marker and both act on it. Renaming the dead marker
+ * away is what actually transfers ownership — atomically, since rename() can only ever
+ * be won by one process for a given source path before it's gone — rather than a
+ * separate read-then-delete, so at most one process ever proceeds to replace any one
+ * specific dead instance.
  */
-function acquireTakeoverLock(lockPath) {
-  const write = () => fs.writeFileSync(lockPath, String(process.pid), { flag: 'wx' });
+async function claimMarkerExclusively(markerPath) {
+  const payload = () => ({ pid: process.pid, at: new Date().toISOString() });
   try {
-    write();
+    publishAtomically(markerPath, payload());
     return true;
   } catch (err) {
     if (err.code !== 'EEXIST') throw err;
   }
-  let ageMs;
+  if (!(await isMarkerAbandoned(markerPath))) return false;
+  const retired = `${markerPath}.retired-${process.pid}-${Date.now()}`;
   try {
-    ageMs = Date.now() - fs.statSync(lockPath).mtimeMs;
-  } catch {
-    ageMs = Infinity; // gone already — try again below
-  }
-  if (ageMs <= TAKEOVER_LOCK_STALE_MS) return false;
-
-  // Reclaiming a stale lock must itself be atomic: two processes could both stat the
-  // same stale lock and both decide to reclaim it before either acts. Renaming it away
-  // is what actually decides ownership of that specific stale instance, not a separate
-  // stat-then-delete — rename() can only ever be won by one process for a given source
-  // path before it's gone, so at most one process proceeds past this point for it.
-  const retired = `${lockPath}.retired-${process.pid}-${Date.now()}`;
-  try {
-    fs.renameSync(lockPath, retired);
+    fs.renameSync(markerPath, retired);
   } catch (err) {
-    if (err.code === 'ENOENT') return false; // someone else already claimed/removed it
+    if (err.code === 'ENOENT') return false; // someone else already claimed it
     throw err;
   }
   fs.rmSync(retired, { force: true });
   try {
-    write();
+    publishAtomically(markerPath, payload());
     return true;
   } catch (err) {
     if (err.code !== 'EEXIST') throw err;
-    return false; // a fresh lock landed in the same instant
-  }
-}
-
-/**
- * Exclusively claim `markerPath` for this process. Returns true if we now own it,
- * false if someone else does and it's confirmed still alive (or the takeover decision
- * is already being made by another concurrent attempt).
- *
- * A plain "read the marker, decide it's dead, delete and replace it" is itself a race:
- * two processes could both read the same dead marker and both decide to take over.
- * The takeover decision is therefore gated by acquireTakeoverLock() — a lock file
- * scoped to this exact marker path — so only its winner is ever allowed to inspect and
- * replace a pre-existing marker; every other simultaneous attempt loses that lock and
- * backs off rather than also acting on what it read.
- */
-function claimMarkerExclusively(markerPath) {
-  try {
-    writeMarkerFile(markerPath);
-    return true;
-  } catch (err) {
-    if (err.code !== 'EEXIST') throw err;
-  }
-  const takeoverLock = `${markerPath}.takeover`;
-  if (!acquireTakeoverLock(takeoverLock)) return false;
-  try {
-    if (!isMarkerAbandoned(markerPath)) return false;
-    fs.rmSync(markerPath, { force: true });
-    writeMarkerFile(markerPath);
-    return true;
-  } finally {
-    fs.rmSync(takeoverLock, { force: true });
+    return false; // a fresh marker landed in the same instant
   }
 }
 
@@ -334,19 +316,19 @@ function createLocalStore({
 
   /**
    * Atomically claim a brand-new prompt dir. A pre-existing SKILL.md always means a
-   * real orphan or registered task and is refused untouched, full stop. A non-empty dir
-   * that doesn't even carry our claim marker can't be one of our claims, abandoned or
-   * otherwise, and is refused the same way without ever being touched.
+   * real orphan or registered task and is refused untouched, full stop. Any entry that
+   * isn't our marker or a recognized protocol artifact (PROTOCOL_ARTIFACT_RE) can't be
+   * one of our claims, abandoned or otherwise, and is refused the same way without ever
+   * being touched.
    *
    * Otherwise ownership of the marker itself is claimed via claimMarkerExclusively(),
    * which is what actually decides — atomically — whether a pre-existing marker is
    * reclaimable (its owning process confirmed dead) or must be left alone (still alive,
-   * or the decision is already being made by another concurrent attempt). Once we hold
-   * the marker, anything else left in the dir (e.g. a dead claim's interrupted
-   * atomicWriteFile temp file) can only be that same dead claim's leftovers and is
-   * cleared now that nothing else can be racing us for it.
+   * or unverifiable). Once we hold the marker, anything else left in the dir is cleared
+   * unless it's a protocol artifact whose embedded pid is still alive — that can only be
+   * a different, still-active concurrent attempt, and must not be disturbed.
    */
-  function claimPromptDir(id) {
+  async function claimPromptDir(id) {
     fs.mkdirSync(skillsDir, { recursive: true });
     const skillDir = path.join(skillsDir, id);
     const filePath = path.join(skillDir, 'SKILL.md');
@@ -361,18 +343,22 @@ function createLocalStore({
 
     const markerPath = path.join(skillDir, CLAIM_MARKER);
     const markerName = path.basename(markerPath);
-    const takeoverName = `${markerName}.takeover`;
     const entriesBefore = fs.readdirSync(skillDir);
-    if (entriesBefore.length > 0 && !entriesBefore.includes(markerName)) refuse();
+    if (entriesBefore.some((e) => e !== markerName && !PROTOCOL_ARTIFACT_RE.test(e))) refuse();
 
     let claimed;
     try {
-      claimed = claimMarkerExclusively(markerPath);
+      claimed = await claimMarkerExclusively(markerPath);
     } catch (err) {
-      // Only safe to clean up here if the dir was confirmed empty going in — otherwise
-      // a pre-existing marker (live or not yet judged) may still be sitting in it, and
-      // an unrelated failure here is no license to destroy that.
-      if (entriesBefore.length === 0) fs.rmSync(skillDir, { recursive: true, force: true });
+      // Only safe to clean up here if the dir is *currently* empty — our own attempt
+      // always cleans up anything it created, even on failure, so anything present now
+      // (checked fresh, not from the stale entriesBefore snapshot above) can only
+      // belong to another, still-active concurrent attempt and must not be touched.
+      try {
+        if (fs.readdirSync(skillDir).length === 0) fs.rmSync(skillDir, { recursive: true, force: true });
+      } catch {
+        // best effort — if we can't even tell, leave it alone
+      }
       throw err;
     }
     if (!claimed) refuse();
@@ -386,12 +372,10 @@ function createLocalStore({
       refuse();
     }
     for (const entry of fs.readdirSync(skillDir)) {
-      // The marker is ours now. A takeover-lock file can't be ours (claimMarkerExclusively
-      // always removes its own before returning) — it can only belong to another,
-      // still-active concurrent attempt, which must not be disturbed.
-      if (entry !== markerName && entry !== takeoverName) {
-        fs.rmSync(path.join(skillDir, entry), { recursive: true, force: true });
-      }
+      if (entry === markerName) continue; // ours now
+      const m = PROTOCOL_ARTIFACT_RE.exec(entry);
+      if (m && isProcessAlive(Number(m[1]))) continue; // a different, still-active attempt
+      fs.rmSync(path.join(skillDir, entry), { recursive: true, force: true });
     }
     return skillDir;
   }
@@ -417,7 +401,7 @@ function createLocalStore({
       throw new AppError('CLAUDE_RUNNING', 'Claude Desktop is running — close it before creating local tasks.');
     }
     assertNewTaskId(spec.id, await readTasksRaw());
-    const skillDir = claimPromptDir(spec.id);
+    const skillDir = await claimPromptDir(spec.id);
     const filePath = path.join(skillDir, 'SKILL.md');
     try {
       await atomicWriteFile(filePath, translate.buildSkillMd({ name: spec.id, description, body }));
