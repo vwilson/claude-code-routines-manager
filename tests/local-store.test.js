@@ -276,3 +276,38 @@ test('renameTask migrates recordedSkips history to the new id', async () => {
   assert.deepEqual(envelope.recordedSkips.beta, [{ at: '2026-07-01T12:00:00Z', reason: 'asleep' }]);
   assert.equal(Object.prototype.hasOwnProperty.call(envelope.recordedSkips, 'alpha'), false);
 });
+
+test('applyUpdate renames and patches in the same call', async () => {
+  const store = makeStore();
+  const { task, promptBody } = await store.applyUpdate('alpha', {
+    newId: 'beta',
+    patch: { displayName: 'Beta Name' },
+    promptBody: 'New body.',
+  });
+  assert.equal(task.id, 'beta');
+  assert.equal(task.displayName, 'Beta Name');
+  assert.equal(promptBody, 'New body.\n');
+  const envelope = JSON.parse(fs.readFileSync(registryPath, 'utf8'));
+  assert.equal(envelope.scheduledTasks[0].id, 'beta');
+  assert.equal(envelope.scheduledTasks[0].displayName, 'Beta Name');
+});
+
+test('applyUpdate rolls back the rename if the subsequent patch fails', async () => {
+  let calls = 0;
+  // false, false (the rename's two gate checks) -> true (updateTask's check fails) -> false, false (rollback rename succeeds)
+  const store = createLocalStore({
+    appDataDir,
+    claudeDir,
+    gate: { isDesktopRunning: async () => ++calls === 3 },
+    now: () => FIXED_NOW,
+  });
+  await assert.rejects(
+    store.applyUpdate('alpha', { newId: 'beta', patch: { displayName: 'Beta Name' } }),
+    (err) => err.code === 'CLAUDE_RUNNING',
+  );
+  assert.equal(fs.existsSync(path.join(claudeDir, 'scheduled-tasks', 'alpha', 'SKILL.md')), true);
+  assert.equal(fs.existsSync(path.join(claudeDir, 'scheduled-tasks', 'beta')), false);
+  const envelope = JSON.parse(fs.readFileSync(registryPath, 'utf8'));
+  assert.equal(envelope.scheduledTasks[0].id, 'alpha');
+  assert.equal(envelope.scheduledTasks[0].displayName, undefined);
+});

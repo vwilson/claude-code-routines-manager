@@ -294,6 +294,26 @@ function createLocalStore({
     return { id: newId, filePath: newFilePath };
   }
 
+  /**
+   * Combined drawer save: rename (if `newId` differs), then write the prompt body
+   * and/or patch fields. If a later step fails after the rename already landed, the
+   * rename is rolled back (renameTask is symmetric) so the caller keeps addressing a
+   * task that still exists under its original id, instead of one now-missing on both sides.
+   */
+  async function applyUpdate(id, { newId, patch, promptBody } = {}) {
+    const willRename = newId !== undefined && newId !== id;
+    if (willRename) await renameTask(id, newId);
+    const currentId = willRename ? newId : id;
+    try {
+      if (promptBody !== undefined) await setPromptBody(currentId, promptBody);
+      if (patch && Object.keys(patch).length > 0) await updateTask(currentId, patch);
+    } catch (err) {
+      if (willRename) await renameTask(currentId, id).catch(() => {});
+      throw err;
+    }
+    return getTask(currentId);
+  }
+
   /** Re-register an orphaned prompt dir as a scheduled task (SKILL.md must already exist). */
   async function importOrphan(spec) {
     const filePath = path.join(skillsDir, spec.id, 'SKILL.md');
@@ -316,6 +336,7 @@ function createLocalStore({
     setPromptBody,
     createTask,
     renameTask,
+    applyUpdate,
     importOrphan,
   };
 }

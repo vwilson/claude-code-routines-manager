@@ -104,7 +104,8 @@ function registerIpc({ gate, cloudApi, localStore }) {
 
   // Validates everything up front — including the rename target — before any mutation
   // runs, so a bad cron/cwd/promptBody can't leave an id rename committed with the
-  // rest of the edit rejected.
+  // rest of the edit rejected. applyUpdate() also rolls the rename back if a later
+  // step fails.
   handle('local:update', async ({ id, newId, patch, promptBody }) => {
     requireString(id, 'id');
     if (newId !== undefined) requireString(newId, 'newId', { re: translate.LOCAL_ID_RE });
@@ -114,14 +115,7 @@ function registerIpc({ gate, cloudApi, localStore }) {
     if (promptBody !== undefined && typeof promptBody !== 'string') {
       throw new AppError('VALIDATION', 'promptBody must be a string');
     }
-    let currentId = id;
-    if (newId !== undefined && newId !== id) {
-      await localStore.renameTask(id, newId);
-      currentId = newId;
-    }
-    if (promptBody !== undefined) await localStore.setPromptBody(currentId, promptBody);
-    if (patch && Object.keys(patch).length > 0) await localStore.updateTask(currentId, patch);
-    return localStore.getTask(currentId);
+    return localStore.applyUpdate(id, { newId, patch, promptBody });
   });
 
   handle('local:importOrphan', async ({ id, cronExpression, fireAt, cwd, model, displayName, enabled }) => {
