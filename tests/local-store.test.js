@@ -2,10 +2,21 @@
 
 const assert = require('node:assert/strict');
 const { test, beforeEach } = require('node:test');
+const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { createLocalStore } = require('../src/main/local-store');
+
+/** A real pid guaranteed to no longer be running: spawnSync blocks until it has exited. */
+function deadPid() {
+  return spawnSync(process.execPath, ['-e', 'process.exit(0)']).pid;
+}
+
+function writeClaimMarker(dir, pid) {
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, '.claim.json'), JSON.stringify({ pid, at: FIXED_NOW.toISOString() }));
+}
 
 const FIXED_NOW = new Date('2026-07-29T12:00:00Z');
 
@@ -183,11 +194,11 @@ test('createTask refuses to overwrite an existing orphaned SKILL.md', async () =
   assert.ok(!envelope.scheduledTasks.some((t) => t.id === 'collision'));
 });
 
-test('createTask reclaims a pre-existing dir that has no SKILL.md, e.g. left by a crashed claim', async () => {
+test('createTask reclaims a dir whose claim marker names a confirmed-dead process', async () => {
   const dir = path.join(claudeDir, 'scheduled-tasks', 'crashed-claim');
-  fs.mkdirSync(dir, { recursive: true });
+  writeClaimMarker(dir, deadPid());
   // A leftover temp file from an atomicWriteFile() that never got to rename — the
-  // process could have been killed right after claimPromptDir() succeeded.
+  // process could have been killed mid-write, right after writing its claim marker.
   fs.writeFileSync(path.join(dir, '.SKILL.md.tmp-1234-0'), 'partial');
   const store = makeStore();
   const entry = await store.createTask(
@@ -197,8 +208,34 @@ test('createTask reclaims a pre-existing dir that has no SKILL.md, e.g. left by 
   const skill = fs.readFileSync(entry.filePath, 'utf8');
   assert.match(skill, /description: recovered/);
   assert.match(skill, /recovered body/);
-  // The stale leftover must not survive the reclaim.
+  // Every leftover from the dead claim — marker and temp file alike — must be gone.
   assert.deepEqual(fs.readdirSync(dir), ['SKILL.md']);
+});
+
+test('createTask refuses a dir whose claim marker names a still-running process', async () => {
+  const dir = path.join(claudeDir, 'scheduled-tasks', 'live-claim');
+  // process.pid (this test process) is guaranteed alive for the duration of the test.
+  writeClaimMarker(dir, process.pid);
+  const store = makeStore();
+  await assert.rejects(
+    store.createTask({ id: 'live-claim', cronExpression: '0 9 * * *', enabled: false }, { description: '', body: 'x' }),
+    (err) => err.code === 'VALIDATION',
+  );
+  // The other (still-running, as far as we can tell) claim must not be touched.
+  assert.ok(fs.existsSync(path.join(dir, '.claim.json')));
+});
+
+test('createTask refuses a dir with unrelated content and no claim marker', async () => {
+  const dir = path.join(claudeDir, 'scheduled-tasks', 'unrelated');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'notes.txt'), 'not a routine at all');
+  const store = makeStore();
+  await assert.rejects(
+    store.createTask({ id: 'unrelated', cronExpression: '0 9 * * *', enabled: false }, { description: '', body: 'x' }),
+    (err) => err.code === 'VALIDATION',
+  );
+  // No verifiable claim marker means it's never ours to reclaim, no matter what's in it.
+  assert.deepEqual(fs.readdirSync(dir), ['notes.txt']);
 });
 
 test('createTask removes the claimed dir if the SKILL.md write itself never lands', async () => {

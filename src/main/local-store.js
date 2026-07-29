@@ -18,6 +18,38 @@ const translate = require('./translate');
 
 const PATCHABLE_FIELDS = ['displayName', 'cronExpression', 'model', 'cwd', 'enabled'];
 
+// Name of the exclusive claim marker written into a prompt dir mid-createTask() — see
+// claimPromptDir(). Dot-prefixed and distinctive so nothing else in this app, and no
+// plausible manual user action, would ever create a file with this exact name.
+const CLAIM_MARKER = '.claim.json';
+
+/** True if `pid` names a currently-running process (best-effort; assumes alive when unsure). */
+function isProcessAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err.code !== 'ESRCH';
+  }
+}
+
+/**
+ * True only if `dir` holds a readable claim marker whose owning process is confirmed
+ * gone. The marker's mere presence proves claimPromptDir() created this directory (its
+ * name isn't something anything else would write); a dead owner proves that specific
+ * claim attempt can never resume. Anything short of that — no marker, an unreadable
+ * one, or a marker whose owner is still alive — is left untouched.
+ */
+function ownedAbandonedClaim(dir) {
+  let marker;
+  try {
+    marker = JSON.parse(fs.readFileSync(path.join(dir, CLAIM_MARKER), 'utf8'));
+  } catch {
+    return false;
+  }
+  return typeof marker.pid === 'number' && !isProcessAlive(marker.pid);
+}
+
 function createLocalStore({
   appDataDir = process.env.APPDATA,
   claudeDir = path.join(os.homedir(), '.claude'),
@@ -205,38 +237,56 @@ function createLocalStore({
   }
 
   /**
-   * Atomically claim a brand-new prompt dir: mkdir (non-recursive, so it fails with
-   * EEXIST rather than silently succeeding) surfaces a collision — an orphaned SKILL.md,
-   * or a same-instant create from another process — as a validation error instead of a
-   * silent overwrite by the following write. A dir that exists but has no SKILL.md can't
-   * be a real orphan or registered task (both require one), so it's either brand new or
-   * left behind by a claim whose write never landed — e.g. the process was killed between
-   * this claim and atomicWriteFile(). There's nothing there to lose, so it's reclaimed
-   * rather than left permanently blocking the id.
+   * Atomically claim a brand-new prompt dir. A pre-existing SKILL.md always means a
+   * real orphan or registered task and is refused untouched, full stop.
+   *
+   * The directory itself is created with {recursive: true} — that's idempotent, not the
+   * exclusivity primitive. The claim marker is: it's written with the exclusive-create
+   * flag ('wx'), so only one process can ever succeed in writing it for a given id.
+   *
+   * Any other pre-existing content (the marker itself, a live claim's in-progress
+   * files, or something wholly unrelated) is only ever cleared when
+   * ownedAbandonedClaim() can prove it's our own marker AND its owning process is
+   * confirmed dead (e.g. killed between this claim and atomicWriteFile() finishing) —
+   * never for a still-running claim, and never for unrelated content that happens to
+   * share this id, both of which are refused the same as a real orphan.
    */
   function claimPromptDir(id) {
     fs.mkdirSync(skillsDir, { recursive: true });
     const skillDir = path.join(skillsDir, id);
-    const claim = () => fs.mkdirSync(skillDir);
-    try {
-      claim();
-      return skillDir;
-    } catch (err) {
-      if (err.code !== 'EEXIST') throw err;
-    }
-    if (!fs.existsSync(path.join(skillDir, 'SKILL.md'))) {
-      fs.rmSync(skillDir, { recursive: true, force: true });
+    const refuse = () => {
+      throw new AppError(
+        'VALIDATION',
+        `"${skillDir}" already exists — pick a different id, or register the existing prompt from the orphan list instead of creating a new task`,
+      );
+    };
+    if (fs.existsSync(path.join(skillDir, 'SKILL.md'))) refuse();
+    fs.mkdirSync(skillDir, { recursive: true });
+    const markerPath = path.join(skillDir, CLAIM_MARKER);
+    const writeMarker = () =>
+      fs.writeFileSync(markerPath, JSON.stringify({ pid: process.pid, at: now().toISOString() }), { flag: 'wx' });
+
+    // At most 2 passes: the second only runs if another process's marker lands in the
+    // gap between our own emptiness check and our own marker write.
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      if (fs.readdirSync(skillDir).length > 0) {
+        if (!ownedAbandonedClaim(skillDir)) refuse();
+        fs.rmSync(skillDir, { recursive: true, force: true });
+        fs.mkdirSync(skillDir, { recursive: true });
+      }
       try {
-        claim();
+        writeMarker();
         return skillDir;
       } catch (err) {
-        if (err.code !== 'EEXIST') throw err;
+        if (err.code !== 'EEXIST') {
+          // Unexpected failure on a dir we just confirmed empty and own — nothing
+          // valuable left to protect, so clear it before propagating.
+          fs.rmSync(skillDir, { recursive: true, force: true });
+          throw err;
+        }
       }
     }
-    throw new AppError(
-      'VALIDATION',
-      `"${skillDir}" already exists — pick a different id, or register the existing prompt from the orphan list instead of creating a new task`,
-    );
+    refuse();
   }
 
   /** Basenames of every prompt dir under scheduled-tasks, registered or orphaned — for id-collision checks. */
@@ -270,12 +320,15 @@ function createLocalStore({
       fs.rmSync(skillDir, { recursive: true, force: true });
       throw err;
     }
-    // SKILL.md now exists on disk and is visible to scanOrphans. From here on we never
-    // delete it on failure: another process could concurrently import this exact orphan,
-    // and re-checking the registry immediately before a delete would still race against
-    // that process's commit. If our own registry write below fails for any reason —
-    // including losing that race — the file is left as a recoverable orphan rather than
-    // destroyed, importable again via importOrphan()/the "Register…" UI flow.
+    // SKILL.md now exists on disk and is visible to scanOrphans; the claim marker has
+    // done its job (nothing else could have won this id while it was live) and is no
+    // longer needed. From here on we never delete SKILL.md on failure: another process
+    // could concurrently import this exact orphan, and re-checking the registry
+    // immediately before a delete would still race against that process's commit. If
+    // our own registry write below fails for any reason — including losing that race —
+    // the file is left as a recoverable orphan rather than destroyed, importable again
+    // via importOrphan()/the "Register…" UI flow.
+    fs.rmSync(path.join(skillDir, CLAIM_MARKER), { force: true });
     const entry = registryEntry(spec, filePath);
     await mutateRegistry((envelope) => {
       assertNewTaskId(spec.id, envelope.scheduledTasks);
