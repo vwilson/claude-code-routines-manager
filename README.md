@@ -9,9 +9,9 @@ A small Electron app for managing Claude Code automation in both places it lives
   (`https://api.anthropic.com/v1/code/triggers`, shown at <https://claude.ai/code/routines>).
 
 Two panes, enable/disable toggles, in-place editing (prompt / cron / name / model / cwd),
-orphaned-prompt import, cloud "Run now", and **Move** in either direction
-(move = create on the target side, then disable the source — cloud routines cannot be
-deleted via the API, only disabled).
+orphaned-prompt import, cloud "Run now", **Duplicate** on either side, and **Move** in
+either direction (move = create on the target side, then disable the source — cloud
+routines cannot be deleted via the API, only disabled).
 
 ## Run
 
@@ -44,7 +44,12 @@ npm test
   otherwise they ask for a manually entered target cron. The shift uses today's UTC
   offset — a fixed UTC cron inherently drifts one wall-clock hour across DST transitions.
 - MCP connections and notification settings on cloud routines are **not** carried over by
-  a move; the result dialog and warnings say so.
+  a move or a duplicate; the dialogs' warnings say so.
+- **Duplicate** copies within a side and never touches the original. A local copy inherits
+  the whole registry entry (including fields this app does not model, e.g. `useWorktree`)
+  minus run state, and gets its own `~\.claude\scheduled-tasks\<new-id>\SKILL.md`. A cloud
+  copy reuses the source's `job_config` verbatim with fresh event uuids. Both default to
+  disabled and always ask for the schedule, so a copy never silently doubles a run.
 
 ## Manual end-to-end verification
 
@@ -69,7 +74,12 @@ Run with Claude Desktop **closed** unless a step says otherwise.
 6. **One-shot probe**: register a disabled one-shot (`fireAt` tomorrow), restart Claude
    Desktop, confirm the task survives in its UI (validates the ISO `fireAt` format; if it
    is dropped, switch `registryEntry` to epoch ms and re-run).
-7. **Failure paths**: refresh while offline → NETWORK banner/toast; a failed cloud toggle
+7. **Duplicate**: from a local task's drawer, Duplicate… → accept the suggested
+   `<id>-copy`, keep it disabled → the new row appears with the same cwd/model, its
+   SKILL.md matches the source's, and the source entry is byte-identical in the registry
+   diff. From a cloud routine's drawer, Duplicate… with a shifted cron → the copy shows up
+   disabled at claude.ai with the same environment, repo, tools and prompt.
+8. **Failure paths**: refresh while offline → NETWORK banner/toast; a failed cloud toggle
    leaves the switch state unchanged.
-8. **Cleanup**: delete test routines at <https://claude.ai/code/routines> (there is no
+9. **Cleanup**: delete test routines at <https://claude.ai/code/routines> (there is no
    DELETE API); remove test registry entries by hand with Desktop closed.

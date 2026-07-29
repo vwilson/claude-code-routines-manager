@@ -180,3 +180,49 @@ test('buildSkillMd -> parseSkillMd round-trips the body', () => {
   assert.deepEqual(frontmatter, { name: 'demo', description: 'multi line desc' });
   assert.equal(body, 'Prompt body.\n\nMore.\n');
 });
+
+test('buildTriggerDuplicateBody reuses job_config with fresh event identity', () => {
+  const trigger = {
+    id: 'trg_1',
+    name: 'Original',
+    cron_expression: '0 13 * * 1',
+    enabled: true,
+    mcp_connections: [{ name: 'linear', url: 'https://mcp.linear.app' }],
+    job_config: {
+      ccr: {
+        environment_id: 'env_1',
+        session_context: { model: 'claude-opus-5', sources: [{ git_repository: { url: 'https://github.com/o/r' } }] },
+        events: [{ data: { uuid: 'old-uuid', session_id: 'sess_1', message: { content: 'Do the thing', role: 'user' } } }],
+      },
+      unknownBlock: { keepMe: true },
+    },
+  };
+  const body = translate.buildTriggerDuplicateBody(trigger, {
+    name: 'Original (copy)',
+    cronExpression: '0 15 * * 1',
+    enabled: false,
+    newUuid: () => 'new-uuid',
+  });
+  assert.equal(body.name, 'Original (copy)');
+  assert.equal(body.enabled, false);
+  assert.equal(body.cron_expression, '0 15 * * 1');
+  assert.equal(body.run_once_at, undefined);
+  assert.equal(body.job_config.ccr.environment_id, 'env_1');
+  assert.equal(body.job_config.ccr.events[0].data.message.content, 'Do the thing');
+  assert.equal(body.job_config.ccr.events[0].data.uuid, 'new-uuid');
+  assert.equal(body.job_config.ccr.events[0].data.session_id, '');
+  assert.deepEqual(body.job_config.unknownBlock, { keepMe: true });
+  assert.equal(body.mcp_connections, undefined);
+  // the source object must not be mutated
+  assert.equal(trigger.job_config.ccr.events[0].data.uuid, 'old-uuid');
+});
+
+test('buildTriggerDuplicateBody carries a one-shot schedule', () => {
+  const body = translate.buildTriggerDuplicateBody(
+    { job_config: { ccr: { events: [] } } },
+    { name: 'copy', runOnceAt: '2026-08-01T10:00:00.000Z', enabled: true },
+  );
+  assert.equal(body.run_once_at, '2026-08-01T10:00:00.000Z');
+  assert.equal(body.cron_expression, undefined);
+  assert.equal(body.enabled, true);
+});

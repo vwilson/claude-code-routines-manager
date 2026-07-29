@@ -56,6 +56,18 @@ function requireSchedule({ cronExpression, oneShotAt }, oneShotName) {
   return { oneShotAt: iso };
 }
 
+/** requireSchedule plus the cloud-only rules: hourly-at-most crons, one-shots in the future. */
+function requireCloudSchedule({ cronExpression, runOnceAt }) {
+  const schedule = requireSchedule({ cronExpression, oneShotAt: runOnceAt }, 'runOnceAt');
+  if (schedule.cronExpression) {
+    const problem = translate.validateCloudCron(schedule.cronExpression);
+    if (problem) throw new AppError('VALIDATION', problem);
+  } else if (new Date(schedule.oneShotAt).getTime() <= Date.now()) {
+    throw new AppError('VALIDATION', 'runOnceAt must be in the future');
+  }
+  return schedule;
+}
+
 function requireExistingDir(value, name) {
   requireString(value, name);
   let stat;
@@ -112,6 +124,23 @@ function registerIpc({ gate, cloudApi, localStore }) {
     }
     if (promptBody !== undefined) await localStore.setPromptBody(id, promptBody);
     if (patch && Object.keys(patch).length > 0) await localStore.updateTask(id, patch);
+    return localStore.getTask(id);
+  });
+
+  handle('local:duplicate', async ({ sourceId, id, cronExpression, fireAt, cwd, model, displayName, enabled }) => {
+    requireString(sourceId, 'sourceId');
+    requireString(id, 'id', { re: translate.LOCAL_ID_RE });
+    const schedule = requireSchedule({ cronExpression, oneShotAt: fireAt }, 'fireAt');
+    if (cwd !== undefined) requireExistingDir(cwd, 'cwd');
+    await localStore.duplicateTask(sourceId, {
+      id,
+      cronExpression: schedule.cronExpression,
+      fireAt: schedule.oneShotAt,
+      cwd,
+      model,
+      displayName,
+      enabled: enabled === true,
+    });
     return localStore.getTask(id);
   });
 
@@ -183,6 +212,24 @@ function registerIpc({ gate, cloudApi, localStore }) {
     return freshTriggerVM(id);
   });
 
+  handle('cloud:duplicate', async ({ id, name, cronExpression, runOnceAt, enabled }) => {
+    requireString(id, 'id');
+    requireString(name, 'name');
+    optionalBool(enabled, 'enabled');
+    const schedule = requireCloudSchedule({ cronExpression, runOnceAt });
+    const source = await cloudApi.getTrigger(id);
+    if (!source.job_config?.ccr) throw new AppError('VALIDATION', 'this routine has no job config to copy');
+    const created = await cloudApi.createTrigger(
+      translate.buildTriggerDuplicateBody(source, {
+        name,
+        cronExpression: schedule.cronExpression,
+        runOnceAt: schedule.oneShotAt,
+        enabled: enabled === true,
+      }),
+    );
+    return freshTriggerVM(created.id);
+  });
+
   handle('cloud:run', async ({ id }) => {
     await cloudApi.runTrigger(requireString(id, 'id'));
     return {};
@@ -215,13 +262,7 @@ function registerIpc({ gate, cloudApi, localStore }) {
     if (!Array.isArray(args.allowedTools) || args.allowedTools.some((t) => typeof t !== 'string')) {
       throw new AppError('VALIDATION', 'allowedTools must be an array of strings');
     }
-    const schedule = requireSchedule({ cronExpression: args.cronExpression, oneShotAt: args.runOnceAt }, 'runOnceAt');
-    if (schedule.cronExpression) {
-      const problem = translate.validateCloudCron(schedule.cronExpression);
-      if (problem) throw new AppError('VALIDATION', problem);
-    } else if (new Date(schedule.oneShotAt).getTime() <= Date.now()) {
-      throw new AppError('VALIDATION', 'runOnceAt must be in the future');
-    }
+    const schedule = requireCloudSchedule(args);
     return moves.moveLocalToCloud(
       { ...args, cronExpression: schedule.cronExpression, runOnceAt: schedule.oneShotAt },
       services,

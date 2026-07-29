@@ -232,6 +232,59 @@ function createLocalStore({
     return entry;
   }
 
+  /**
+   * Copy an existing task to a new id: the whole registry entry (so unknown fields
+   * like useWorktree or disableJitter carry over) minus run state, plus a fresh copy
+   * of its SKILL.md. Schedule/cwd/model/name come from `spec` — the caller always
+   * decides those, since a copy that fires at the same moment is rarely what's wanted.
+   */
+  async function duplicateTask(sourceId, spec) {
+    if (await gate.isDesktopRunning({ fresh: true })) {
+      throw new AppError('CLAUDE_RUNNING', 'Claude Desktop is running — close it before duplicating local tasks.');
+    }
+    const tasks = await readTasksRaw();
+    const source = tasks.find((t) => t.id === sourceId);
+    if (!source) throw new AppError('NOT_FOUND', `no local task "${sourceId}"`);
+    assertNewTaskId(spec.id, tasks);
+    const skillDir = path.join(skillsDir, spec.id);
+    const filePath = path.join(skillDir, 'SKILL.md');
+    if (fs.existsSync(filePath)) {
+      throw new AppError('VALIDATION', `a prompt directory for "${spec.id}" already exists at ${skillDir}`);
+    }
+    const skill = readSkill(source.filePath);
+    const dirExisted = fs.existsSync(skillDir);
+    fs.mkdirSync(skillDir, { recursive: true });
+    await atomicWriteFile(
+      filePath,
+      translate.buildSkillMd({
+        name: spec.id,
+        description: skill?.frontmatter.description ?? '',
+        body: skill?.body ?? '',
+      }),
+    );
+
+    // Inherit everything, then let the spec win. Fields the spec leaves blank fall back
+    // to the source's; run state and the schedule the copy does not use are dropped.
+    const entry = { ...source, ...registryEntry(spec, filePath) };
+    delete entry.lastRunAt;
+    delete entry.lastScheduledFor;
+    delete entry[spec.cronExpression ? 'fireAt' : 'cronExpression'];
+    if (!spec.displayName) delete entry.displayName;
+
+    try {
+      await mutateRegistry((envelope) => {
+        assertNewTaskId(spec.id, envelope.scheduledTasks);
+        envelope.scheduledTasks.push(entry);
+      });
+    } catch (err) {
+      // Registry write lost the race (desktop relaunched, id taken externally): take the
+      // half-written prompt back out so it does not linger as a phantom orphan.
+      fs.rmSync(dirExisted ? filePath : skillDir, { recursive: true, force: true });
+      throw err;
+    }
+    return entry;
+  }
+
   /** Re-register an orphaned prompt dir as a scheduled task (SKILL.md must already exist). */
   async function importOrphan(spec) {
     const filePath = path.join(skillsDir, spec.id, 'SKILL.md');
@@ -253,6 +306,7 @@ function createLocalStore({
     updateTask,
     setPromptBody,
     createTask,
+    duplicateTask,
     importOrphan,
   };
 }

@@ -144,6 +144,28 @@ function buildTriggerCreateBody({
   };
 }
 
+/**
+ * A create body that reuses an existing trigger's job_config verbatim (environment,
+ * repo, allowed tools, prompt and anything else this app does not model), with a new
+ * name, schedule and enabled flag. Event uuids are regenerated so the copy does not
+ * share identity with the original; mcp_connections live outside job_config and are
+ * not carried over.
+ */
+function buildTriggerDuplicateBody(trigger, { name, cronExpression, runOnceAt, enabled, newUuid = () => crypto.randomUUID() }) {
+  const jobConfig = structuredClone(trigger.job_config ?? {});
+  for (const event of jobConfig.ccr?.events ?? []) {
+    if (!event.data) continue;
+    event.data.uuid = newUuid();
+    event.data.session_id = '';
+  }
+  return {
+    name,
+    enabled: Boolean(enabled),
+    ...(cronExpression ? { cron_expression: cronExpression } : { run_once_at: runOnceAt }),
+    job_config: jobConfig,
+  };
+}
+
 function slugify(name) {
   const slug = String(name ?? '')
     .toLowerCase()
@@ -229,6 +251,7 @@ module.exports = {
   localTaskToVM,
   triggerToVM,
   buildTriggerCreateBody,
+  buildTriggerDuplicateBody,
   slugify,
   dedupeId,
   normalizeRepoUrl,
