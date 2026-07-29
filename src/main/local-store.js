@@ -33,21 +33,49 @@ function isProcessAlive(pid) {
   }
 }
 
+function writeMarkerFile(markerPath) {
+  fs.writeFileSync(markerPath, JSON.stringify({ pid: process.pid, at: new Date().toISOString() }), { flag: 'wx' });
+}
+
 /**
- * True only if `dir` holds a readable claim marker whose owning process is confirmed
- * gone. The marker's mere presence proves claimPromptDir() created this directory (its
- * name isn't something anything else would write); a dead owner proves that specific
- * claim attempt can never resume. Anything short of that — no marker, an unreadable
- * one, or a marker whose owner is still alive — is left untouched.
+ * Exclusively claim `markerPath` for this process. Returns true if we now own it,
+ * false if someone else does and it's confirmed still alive (or unreadable/ambiguous).
+ *
+ * A plain "read the marker, decide it's dead, delete and replace it" is itself a race:
+ * two processes could both read the same dead marker and both decide to take over.
+ * The takeover decision is therefore gated by a second exclusive-create — a lock file
+ * scoped to this exact marker path — so only its winner is ever allowed to inspect and
+ * replace a pre-existing marker; every other simultaneous attempt loses that lock and
+ * backs off rather than also acting on what it read.
  */
-function ownedAbandonedClaim(dir) {
-  let marker;
+function claimMarkerExclusively(markerPath) {
   try {
-    marker = JSON.parse(fs.readFileSync(path.join(dir, CLAIM_MARKER), 'utf8'));
-  } catch {
-    return false;
+    writeMarkerFile(markerPath);
+    return true;
+  } catch (err) {
+    if (err.code !== 'EEXIST') throw err;
   }
-  return typeof marker.pid === 'number' && !isProcessAlive(marker.pid);
+  const takeoverLock = `${markerPath}.takeover`;
+  try {
+    fs.writeFileSync(takeoverLock, String(process.pid), { flag: 'wx' });
+  } catch (err) {
+    if (err.code !== 'EEXIST') throw err;
+    return false; // another process is already deciding this marker's fate
+  }
+  try {
+    let marker;
+    try {
+      marker = JSON.parse(fs.readFileSync(markerPath, 'utf8'));
+    } catch {
+      return false; // unreadable — nothing verifiable, leave it alone
+    }
+    if (typeof marker.pid !== 'number' || isProcessAlive(marker.pid)) return false;
+    fs.rmSync(markerPath, { force: true });
+    writeMarkerFile(markerPath);
+    return true;
+  } finally {
+    fs.rmSync(takeoverLock, { force: true });
+  }
 }
 
 function createLocalStore({
@@ -238,18 +266,17 @@ function createLocalStore({
 
   /**
    * Atomically claim a brand-new prompt dir. A pre-existing SKILL.md always means a
-   * real orphan or registered task and is refused untouched, full stop.
+   * real orphan or registered task and is refused untouched, full stop. A non-empty dir
+   * that doesn't even carry our claim marker can't be one of our claims, abandoned or
+   * otherwise, and is refused the same way without ever being touched.
    *
-   * The directory itself is created with {recursive: true} — that's idempotent, not the
-   * exclusivity primitive. The claim marker is: it's written with the exclusive-create
-   * flag ('wx'), so only one process can ever succeed in writing it for a given id.
-   *
-   * Any other pre-existing content (the marker itself, a live claim's in-progress
-   * files, or something wholly unrelated) is only ever cleared when
-   * ownedAbandonedClaim() can prove it's our own marker AND its owning process is
-   * confirmed dead (e.g. killed between this claim and atomicWriteFile() finishing) —
-   * never for a still-running claim, and never for unrelated content that happens to
-   * share this id, both of which are refused the same as a real orphan.
+   * Otherwise ownership of the marker itself is claimed via claimMarkerExclusively(),
+   * which is what actually decides — atomically — whether a pre-existing marker is
+   * reclaimable (its owning process confirmed dead) or must be left alone (still alive,
+   * or the decision is already being made by another concurrent attempt). Once we hold
+   * the marker, anything else left in the dir (e.g. a dead claim's interrupted
+   * atomicWriteFile temp file) can only be that same dead claim's leftovers and is
+   * cleared now that nothing else can be racing us for it.
    */
   function claimPromptDir(id) {
     fs.mkdirSync(skillsDir, { recursive: true });
@@ -262,31 +289,27 @@ function createLocalStore({
     };
     if (fs.existsSync(path.join(skillDir, 'SKILL.md'))) refuse();
     fs.mkdirSync(skillDir, { recursive: true });
-    const markerPath = path.join(skillDir, CLAIM_MARKER);
-    const writeMarker = () =>
-      fs.writeFileSync(markerPath, JSON.stringify({ pid: process.pid, at: now().toISOString() }), { flag: 'wx' });
 
-    // At most 2 passes: the second only runs if another process's marker lands in the
-    // gap between our own emptiness check and our own marker write.
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      if (fs.readdirSync(skillDir).length > 0) {
-        if (!ownedAbandonedClaim(skillDir)) refuse();
-        fs.rmSync(skillDir, { recursive: true, force: true });
-        fs.mkdirSync(skillDir, { recursive: true });
-      }
-      try {
-        writeMarker();
-        return skillDir;
-      } catch (err) {
-        if (err.code !== 'EEXIST') {
-          // Unexpected failure on a dir we just confirmed empty and own — nothing
-          // valuable left to protect, so clear it before propagating.
-          fs.rmSync(skillDir, { recursive: true, force: true });
-          throw err;
-        }
-      }
+    const markerPath = path.join(skillDir, CLAIM_MARKER);
+    const markerName = path.basename(markerPath);
+    const entriesBefore = fs.readdirSync(skillDir);
+    if (entriesBefore.length > 0 && !entriesBefore.includes(markerName)) refuse();
+
+    let claimed;
+    try {
+      claimed = claimMarkerExclusively(markerPath);
+    } catch (err) {
+      // Only safe to clean up here if the dir was confirmed empty going in — otherwise
+      // a pre-existing marker (live or not yet judged) may still be sitting in it, and
+      // an unrelated failure here is no license to destroy that.
+      if (entriesBefore.length === 0) fs.rmSync(skillDir, { recursive: true, force: true });
+      throw err;
     }
-    refuse();
+    if (!claimed) refuse();
+    for (const entry of fs.readdirSync(skillDir)) {
+      if (entry !== markerName) fs.rmSync(path.join(skillDir, entry), { recursive: true, force: true });
+    }
+    return skillDir;
   }
 
   /** Basenames of every prompt dir under scheduled-tasks, registered or orphaned — for id-collision checks. */

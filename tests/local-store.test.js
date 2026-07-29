@@ -238,6 +238,23 @@ test('createTask refuses a dir with unrelated content and no claim marker', asyn
   assert.deepEqual(fs.readdirSync(dir), ['notes.txt']);
 });
 
+test('createTask refuses when another process already holds the reclaim takeover lock', async () => {
+  // Simulates the exact window two racing reclaims would otherwise both act in: a dead
+  // marker plus a takeover lock another process has already (atomically) won. We must
+  // back off rather than also deciding the dead marker's fate ourselves.
+  const dir = path.join(claudeDir, 'scheduled-tasks', 'contended-reclaim');
+  writeClaimMarker(dir, deadPid());
+  fs.writeFileSync(path.join(dir, '.claim.json.takeover'), '999999');
+  const store = makeStore();
+  await assert.rejects(
+    store.createTask({ id: 'contended-reclaim', cronExpression: '0 9 * * *', enabled: false }, { description: '', body: 'x' }),
+    (err) => err.code === 'VALIDATION',
+  );
+  // Neither the original marker nor the other process's lock should be touched.
+  assert.ok(fs.existsSync(path.join(dir, '.claim.json')));
+  assert.ok(fs.existsSync(path.join(dir, '.claim.json.takeover')));
+});
+
 test('createTask removes the claimed dir if the SKILL.md write itself never lands', async () => {
   const store = makeStore();
   const originalOpenSync = fs.openSync;
