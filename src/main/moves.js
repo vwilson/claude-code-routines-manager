@@ -90,9 +90,16 @@ async function previewCloudToLocal(sourceId, { localStore, freshTriggerVM }) {
     throw new AppError('VALIDATION', 'this one-shot routine has already fired — nothing to move');
   }
   const tasks = await localStore.readTasksRaw();
+  // Suggestions are always lowercase (slugify), but a prompt dir's on-disk name may not
+  // be — and Windows' default case-insensitive filesystem would still reject the
+  // suggested id at claimPromptDir() time. Compare case-insensitively so the suggestion
+  // dodges it up front.
+  const takenIds = new Set(
+    [...tasks.map((t) => t.id), ...localStore.listPromptDirIds()].map((id) => id.toLowerCase()),
+  );
   const cronInfo = shiftedCron(vm.cronExpression, -offset);
   return {
-    suggestedId: translate.dedupeId(translate.slugify(vm.name), tasks.map((t) => t.id)),
+    suggestedId: translate.dedupeId(translate.slugify(vm.name), takenIds),
     displayName: vm.name,
     prompt: vm.prompt,
     model: vm.model,

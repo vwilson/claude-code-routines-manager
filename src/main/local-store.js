@@ -13,10 +13,120 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { AppError } = require('./errors');
-const { atomicWriteFile, readJsonWithRetry } = require('./fsx');
+const { atomicWriteFile, readJsonWithRetry, sleep } = require('./fsx');
 const translate = require('./translate');
 
 const PATCHABLE_FIELDS = ['displayName', 'cronExpression', 'model', 'cwd', 'enabled'];
+
+// Name of the exclusive claim marker written into a prompt dir mid-createTask() — see
+// claimPromptDir(). Dot-prefixed and distinctive so nothing else in this app, and no
+// plausible manual user action, would ever create a file with this exact name.
+const CLAIM_MARKER = '.claim.json';
+
+// Matches every temp artifact our own write protocols can leave behind for a given id:
+// claimMarkerExclusively()'s own tmp/retired files, and atomicWriteFile()'s tmp file for
+// SKILL.md itself (fsx.js names it `.${basename}.tmp-${pid}-${timestamp}`). Nothing else
+// could ever produce a name in this shape, so any entry that matches is provably either
+// ours or another live attempt's to reason about — never an unrelated stranger's —
+// without needing to read its content, just its embedded pid (capture group 1).
+const PROTOCOL_ARTIFACT_RE = /^\.(?:claim\.json\.(?:tmp|retired)|SKILL\.md\.tmp)-(\d+)-\d+$/;
+
+/** True if `pid` names a currently-running process (best-effort; assumes alive when unsure). */
+function isProcessAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err.code !== 'ESRCH';
+  }
+}
+
+/**
+ * Publish `targetPath` with `payload` (JSON), atomically: the content is written in
+ * full to a private temp file first, then linked into place. link() is atomic and fails
+ * EEXIST if the destination already exists, but — unlike writing directly with
+ * {flag:'wx'} — targetPath never becomes visible to another process until its content
+ * already is complete, so a reader can never observe it as created-but-still-empty (or
+ * partially written) and mistake that for corruption.
+ */
+function publishAtomically(targetPath, payload) {
+  const tmp = `${targetPath}.tmp-${process.pid}-${Date.now()}`;
+  fs.writeFileSync(tmp, JSON.stringify(payload));
+  try {
+    fs.linkSync(tmp, targetPath);
+  } finally {
+    fs.rmSync(tmp, { force: true });
+  }
+}
+
+/**
+ * True if the claim at `markerPath` can be proven abandoned: a readable, valid pid
+ * that's confirmed no longer running. A transient read failure (e.g. antivirus briefly
+ * locking a freshly-written file on Windows, same as atomicWriteFile() already works
+ * around) is retried a few times before giving up. A missing marker (ENOENT — its owner
+ * already cleaned it up after finishing; claimPromptDir()'s own SKILL.md re-check covers
+ * that case) counts as abandoned. Anything else unreadable, or unparseable, fails
+ * closed — refusing to treat what we can't verify as proof of anything, since its owner
+ * might still be alive.
+ */
+async function isMarkerAbandoned(markerPath) {
+  let raw;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      raw = fs.readFileSync(markerPath, 'utf8');
+      break;
+    } catch (err) {
+      if (err.code === 'ENOENT') return true;
+      if (attempt >= 3 || (err.code !== 'EPERM' && err.code !== 'EBUSY')) return false;
+      await sleep(100);
+    }
+  }
+  let marker;
+  try {
+    marker = JSON.parse(raw);
+  } catch {
+    return false; // corrupt content — can't verify, don't guess
+  }
+  return typeof marker.pid === 'number' && !isProcessAlive(marker.pid);
+}
+
+/**
+ * Exclusively claim `markerPath` for this process, taking over an existing one if
+ * isMarkerAbandoned() proves it's abandoned. Returns true if we now own it, false if
+ * someone else does and it's still alive (or unverifiable).
+ *
+ * A plain "verify abandoned, then delete and replace" is itself a race: two processes
+ * could both verify the same dead marker and both act on it. Renaming the dead marker
+ * away is what actually transfers ownership — atomically, since rename() can only ever
+ * be won by one process for a given source path before it's gone — rather than a
+ * separate read-then-delete, so at most one process ever proceeds to replace any one
+ * specific dead instance.
+ */
+async function claimMarkerExclusively(markerPath) {
+  const payload = () => ({ pid: process.pid, at: new Date().toISOString() });
+  try {
+    publishAtomically(markerPath, payload());
+    return true;
+  } catch (err) {
+    if (err.code !== 'EEXIST') throw err;
+  }
+  if (!(await isMarkerAbandoned(markerPath))) return false;
+  const retired = `${markerPath}.retired-${process.pid}-${Date.now()}`;
+  try {
+    fs.renameSync(markerPath, retired);
+  } catch (err) {
+    if (err.code === 'ENOENT') return false; // someone else already claimed it
+    throw err;
+  }
+  fs.rmSync(retired, { force: true });
+  try {
+    publishAtomically(markerPath, payload());
+    return true;
+  } catch (err) {
+    if (err.code !== 'EEXIST') throw err;
+    return false; // a fresh marker landed in the same instant
+  }
+}
 
 function createLocalStore({
   appDataDir = process.env.APPDATA,
@@ -210,6 +320,77 @@ function createLocalStore({
     }
   }
 
+  /**
+   * Atomically claim a brand-new prompt dir. A pre-existing SKILL.md always means a
+   * real orphan or registered task and is refused untouched, full stop. Any entry that
+   * isn't our marker or a recognized protocol artifact (PROTOCOL_ARTIFACT_RE) can't be
+   * one of our claims, abandoned or otherwise, and is refused the same way without ever
+   * being touched.
+   *
+   * Otherwise ownership of the marker itself is claimed via claimMarkerExclusively(),
+   * which is what actually decides — atomically — whether a pre-existing marker is
+   * reclaimable (its owning process confirmed dead) or must be left alone (still alive,
+   * or unverifiable). Once we hold the marker, anything else left in the dir is cleared
+   * unless it's a protocol artifact whose embedded pid is still alive — that can only be
+   * a different, still-active concurrent attempt, and must not be disturbed.
+   */
+  async function claimPromptDir(id) {
+    fs.mkdirSync(skillsDir, { recursive: true });
+    const skillDir = path.join(skillsDir, id);
+    const filePath = path.join(skillDir, 'SKILL.md');
+    const refuse = () => {
+      throw new AppError(
+        'VALIDATION',
+        `"${skillDir}" already exists — pick a different id, or register the existing prompt from the orphan list instead of creating a new task`,
+      );
+    };
+    if (fs.existsSync(filePath)) refuse();
+    fs.mkdirSync(skillDir, { recursive: true });
+
+    const markerPath = path.join(skillDir, CLAIM_MARKER);
+    const markerName = path.basename(markerPath);
+    const entriesBefore = fs.readdirSync(skillDir);
+    if (entriesBefore.some((e) => e !== markerName && !PROTOCOL_ARTIFACT_RE.test(e))) refuse();
+
+    let claimed;
+    try {
+      claimed = await claimMarkerExclusively(markerPath);
+    } catch (err) {
+      // Only safe to clean up here if the dir is *currently* empty — our own attempt
+      // always cleans up anything it created, even on failure, so anything present now
+      // (checked fresh, not from the stale entriesBefore snapshot above) can only
+      // belong to another, still-active concurrent attempt and must not be touched.
+      try {
+        if (fs.readdirSync(skillDir).length === 0) fs.rmSync(skillDir, { recursive: true, force: true });
+      } catch {
+        // best effort — if we can't even tell, leave it alone
+      }
+      throw err;
+    }
+    if (!claimed) refuse();
+
+    // A dead claim's owner could have finished publishing SKILL.md an instant before
+    // it was killed, before it got to remove its own marker. Re-check right here, right
+    // before clearing anything, so a stale marker sitting beside already-legitimate
+    // content never causes that content to be destroyed as if it were debris.
+    if (fs.existsSync(filePath)) {
+      fs.rmSync(markerPath, { force: true });
+      refuse();
+    }
+    for (const entry of fs.readdirSync(skillDir)) {
+      if (entry === markerName) continue; // ours now
+      const m = PROTOCOL_ARTIFACT_RE.exec(entry);
+      if (m && isProcessAlive(Number(m[1]))) continue; // a different, still-active attempt
+      fs.rmSync(path.join(skillDir, entry), { recursive: true, force: true });
+    }
+    return skillDir;
+  }
+
+  /** Basenames of every prompt dir under scheduled-tasks, registered or orphaned — for id-collision checks. */
+  function listPromptDirIds() {
+    return listSubdirs(skillsDir).map((dir) => path.basename(dir));
+  }
+
   function registryEntry({ id, cronExpression, fireAt, cwd, model, displayName, enabled }, filePath) {
     const entry = { id, enabled: Boolean(enabled), filePath, createdAt: now().getTime() };
     if (cronExpression) entry.cronExpression = cronExpression;
@@ -226,10 +407,25 @@ function createLocalStore({
       throw new AppError('CLAUDE_RUNNING', 'Claude Desktop is running — close it before creating local tasks.');
     }
     assertNewTaskId(spec.id, await readTasksRaw());
-    const skillDir = path.join(skillsDir, spec.id);
+    const skillDir = await claimPromptDir(spec.id);
     const filePath = path.join(skillDir, 'SKILL.md');
-    fs.mkdirSync(skillDir, { recursive: true });
-    await atomicWriteFile(filePath, translate.buildSkillMd({ name: spec.id, description, body }));
+    try {
+      await atomicWriteFile(filePath, translate.buildSkillMd({ name: spec.id, description, body }));
+    } catch (err) {
+      // Nothing durable was published yet, so the claim is still safely ours to undo —
+      // this keeps the id retryable instead of leaving a stray empty dir behind.
+      fs.rmSync(skillDir, { recursive: true, force: true });
+      throw err;
+    }
+    // SKILL.md now exists on disk and is visible to scanOrphans; the claim marker has
+    // done its job (nothing else could have won this id while it was live) and is no
+    // longer needed. From here on we never delete SKILL.md on failure: another process
+    // could concurrently import this exact orphan, and re-checking the registry
+    // immediately before a delete would still race against that process's commit. If
+    // our own registry write below fails for any reason — including losing that race —
+    // the file is left as a recoverable orphan rather than destroyed, importable again
+    // via importOrphan()/the "Register…" UI flow.
+    fs.rmSync(path.join(skillDir, CLAIM_MARKER), { force: true });
     const entry = registryEntry(spec, filePath);
     await mutateRegistry((envelope) => {
       assertNewTaskId(spec.id, envelope.scheduledTasks);
@@ -473,6 +669,7 @@ function createLocalStore({
     listTasks,
     getTask,
     readTasksRaw,
+    listPromptDirIds,
     updateTask,
     setPromptBody,
     createTask,
