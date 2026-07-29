@@ -258,20 +258,22 @@ function createLocalStore({
     const newFilePath = path.join(newDir, path.basename(task.filePath));
 
     fs.renameSync(oldDir, newDir);
-    const skill = readSkill(newFilePath);
-    if (skill) {
-      await atomicWriteFile(
-        newFilePath,
-        translate.buildSkillMd({ name: newId, description: skill.frontmatter.description ?? '', body: skill.body }),
-      );
-    }
-
     try {
+      const raw = fs.readFileSync(newFilePath, 'utf8');
+      const renamed = translate.renameSkillName(raw, newId);
+      if (renamed !== raw) await atomicWriteFile(newFilePath, renamed);
+
       await mutateRegistry((envelope) => {
         const entry = envelope.scheduledTasks.find((t) => t.id === oldId);
         if (!entry) throw new AppError('NOT_FOUND', `no local task "${oldId}" in the registry (it may have changed externally)`);
+        // Re-check against the freshly-read envelope: the earlier snapshot could be stale.
+        assertNewTaskId(newId, envelope.scheduledTasks);
         entry.id = newId;
         entry.filePath = newFilePath;
+        if (envelope.recordedSkips && Object.prototype.hasOwnProperty.call(envelope.recordedSkips, oldId)) {
+          envelope.recordedSkips[newId] = envelope.recordedSkips[oldId];
+          delete envelope.recordedSkips[oldId];
+        }
       });
     } catch (err) {
       fs.renameSync(newDir, oldDir);

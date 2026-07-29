@@ -244,3 +244,19 @@ test('renameTask is blocked while Claude Desktop runs, leaving the filesystem un
   assert.equal(fs.existsSync(path.join(claudeDir, 'scheduled-tasks', 'alpha')), true);
   assert.equal(fs.existsSync(path.join(claudeDir, 'scheduled-tasks', 'beta')), false);
 });
+
+test('renameTask only rewrites the name: line, preserving other frontmatter, CRLF, and body formatting', async () => {
+  const filePath = path.join(claudeDir, 'scheduled-tasks', 'alpha', 'SKILL.md');
+  const raw = '---\r\nname: alpha\r\ndescription: A test task\r\nextra: keep-me\r\n---\r\n\r\n  Indented body.\r\n';
+  fs.writeFileSync(filePath, raw);
+  await makeStore().renameTask('alpha', 'beta');
+  const result = fs.readFileSync(path.join(claudeDir, 'scheduled-tasks', 'beta', 'SKILL.md'), 'utf8');
+  assert.equal(result, raw.replace('name: alpha', 'name: beta'));
+});
+
+test('renameTask migrates recordedSkips history to the new id', async () => {
+  await makeStore().renameTask('alpha', 'beta');
+  const envelope = JSON.parse(fs.readFileSync(registryPath, 'utf8'));
+  assert.deepEqual(envelope.recordedSkips.beta, [{ at: '2026-07-01T12:00:00Z', reason: 'asleep' }]);
+  assert.equal(Object.prototype.hasOwnProperty.call(envelope.recordedSkips, 'alpha'), false);
+});

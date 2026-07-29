@@ -218,6 +218,33 @@ function buildSkillMd({ name, description, body }) {
   return `---\nname: ${name}\ndescription: ${oneLineDescription}\n---\n\n${String(body).trim()}\n`;
 }
 
+/**
+ * Rewrite only the frontmatter `name:` line of a SKILL.md, preserving every other
+ * line — extra frontmatter fields, body formatting, line endings — verbatim. A no-op
+ * if there's no frontmatter block or no `name:` line to rewrite.
+ */
+function renameSkillName(content, name) {
+  const text = String(content);
+  const eol = text.includes('\r\n') ? '\r\n' : '\n';
+  const lines = text.split(/\r?\n/);
+  if (lines[0]?.trim() !== '---') return text;
+  let end = -1;
+  for (let i = 1; i < lines.length; i++) {
+    if (lines[i].trim() === '---') {
+      end = i;
+      break;
+    }
+  }
+  if (end === -1) return text;
+  for (let i = 1; i < end; i++) {
+    if (/^name:\s*/.test(lines[i])) {
+      lines[i] = `name: ${name}`;
+      return lines.join(eol);
+    }
+  }
+  return text;
+}
+
 module.exports = {
   LOCAL_ID_RE,
   DEFAULT_ALLOWED_TOOLS,
@@ -235,4 +262,5 @@ module.exports = {
   validateCloudCron,
   parseSkillMd,
   buildSkillMd,
+  renameSkillName,
 };

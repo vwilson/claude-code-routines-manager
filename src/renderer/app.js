@@ -205,13 +205,9 @@ async function drawerSave(form) {
   try {
     if (kind === 'local') {
       const original = data.task;
-      let currentId = original.id;
+      // Derive and validate the full edit before making any IPC call, so a bad field
+      // (e.g. an emptied cron expression) fails fast instead of after the id is already renamed.
       const newId = changedValue(form, 'id', original.id);
-      if (newId !== undefined) {
-        state.drawer.data = await call('localRename', { id: currentId, newId });
-        currentId = newId;
-        state.localWriteNotice = true;
-      }
       const patch = {};
       const displayName = changedValue(form, 'displayName', original.displayName);
       if (displayName !== undefined) patch.displayName = displayName;
@@ -226,12 +222,17 @@ async function drawerSave(form) {
       }
       const promptInput = form.elements.promptBody;
       const promptBody = promptInput.value !== data.promptBody ? promptInput.value : undefined;
-      if (Object.keys(patch).length === 0 && promptBody === undefined) {
-        if (newId === undefined) {
-          toast('No changes to save', true);
-          return;
-        }
-      } else {
+      if (newId === undefined && Object.keys(patch).length === 0 && promptBody === undefined) {
+        toast('No changes to save', true);
+        return;
+      }
+      let currentId = original.id;
+      if (newId !== undefined) {
+        state.drawer.data = await call('localRename', { id: currentId, newId });
+        currentId = newId;
+        state.localWriteNotice = true;
+      }
+      if (Object.keys(patch).length > 0 || promptBody !== undefined) {
         state.drawer.data = await call('localUpdate', {
           id: currentId,
           ...(Object.keys(patch).length > 0 && { patch }),

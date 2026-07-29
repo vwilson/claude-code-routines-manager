@@ -180,3 +180,22 @@ test('buildSkillMd -> parseSkillMd round-trips the body', () => {
   assert.deepEqual(frontmatter, { name: 'demo', description: 'multi line desc' });
   assert.equal(body, 'Prompt body.\n\nMore.\n');
 });
+
+test('renameSkillName rewrites only the name: line, preserving everything else', () => {
+  const content = '---\nname: alpha\ndescription: b\nextra: keep-me\n---\n\n  Indented body.\n';
+  const renamed = translate.renameSkillName(content, 'beta');
+  assert.equal(renamed, content.replace('name: alpha', 'name: beta'));
+});
+
+test('renameSkillName preserves CRLF line endings', () => {
+  const content = '---\r\nname: alpha\r\ndescription: b\r\n---\r\nBody.';
+  const renamed = translate.renameSkillName(content, 'beta');
+  assert.equal(renamed, content.replace('name: alpha', 'name: beta'));
+});
+
+test('renameSkillName is a no-op without frontmatter or a name: line', () => {
+  const noFrontmatter = 'no frontmatter here';
+  assert.equal(translate.renameSkillName(noFrontmatter, 'beta'), noFrontmatter);
+  const noNameField = '---\ndescription: b\n---\nBody.';
+  assert.equal(translate.renameSkillName(noNameField, 'beta'), noNameField);
+});
