@@ -42,8 +42,12 @@ function optionalBool(value, name) {
   return value;
 }
 
-/** Exactly one of cronExpression / one-shot time; validates the cron parses. */
-function requireSchedule({ cronExpression, oneShotAt }, oneShotName) {
+/**
+ * Exactly one of cronExpression / one-shot time; validates the cron parses.
+ * `mustBeFuture` is for paths that create a *new* schedule: a one-shot already in the
+ * past would never fire, and neither side lets you edit a one-shot time afterwards.
+ */
+function requireSchedule({ cronExpression, oneShotAt }, oneShotName, { mustBeFuture = false } = {}) {
   if (Boolean(cronExpression) === Boolean(oneShotAt)) {
     throw new AppError('VALIDATION', `provide exactly one of cronExpression and ${oneShotName}`);
   }
@@ -53,17 +57,18 @@ function requireSchedule({ cronExpression, oneShotAt }, oneShotName) {
   }
   const iso = translate.toIso(oneShotAt);
   if (!iso) throw new AppError('VALIDATION', `${oneShotName} is not a valid timestamp`);
+  if (mustBeFuture && new Date(iso).getTime() <= Date.now()) {
+    throw new AppError('VALIDATION', `${oneShotName} must be in the future`);
+  }
   return { oneShotAt: iso };
 }
 
-/** requireSchedule plus the cloud-only rules: hourly-at-most crons, one-shots in the future. */
+/** requireSchedule plus the cloud-only rule that crons fire at most hourly. */
 function requireCloudSchedule({ cronExpression, runOnceAt }) {
-  const schedule = requireSchedule({ cronExpression, oneShotAt: runOnceAt }, 'runOnceAt');
+  const schedule = requireSchedule({ cronExpression, oneShotAt: runOnceAt }, 'runOnceAt', { mustBeFuture: true });
   if (schedule.cronExpression) {
     const problem = translate.validateCloudCron(schedule.cronExpression);
     if (problem) throw new AppError('VALIDATION', problem);
-  } else if (new Date(schedule.oneShotAt).getTime() <= Date.now()) {
-    throw new AppError('VALIDATION', 'runOnceAt must be in the future');
   }
   return schedule;
 }
@@ -133,9 +138,9 @@ function registerIpc({ gate, cloudApi, localStore }) {
   handle('local:duplicate', async ({ sourceId, id, cronExpression, fireAt, cwd, model, displayName, enabled }) => {
     requireString(sourceId, 'sourceId');
     requireString(id, 'id', { re: translate.LOCAL_ID_RE });
-    const schedule = requireSchedule({ cronExpression, oneShotAt: fireAt }, 'fireAt');
+    const schedule = requireSchedule({ cronExpression, oneShotAt: fireAt }, 'fireAt', { mustBeFuture: true });
     if (cwd !== undefined) requireExistingDir(cwd, 'cwd');
-    await localStore.duplicateTask(sourceId, {
+    const entry = await localStore.duplicateTask(sourceId, {
       id,
       cronExpression: schedule.cronExpression,
       fireAt: schedule.oneShotAt,
@@ -144,7 +149,10 @@ function registerIpc({ gate, cloudApi, localStore }) {
       displayName,
       enabled: enabled === true,
     });
-    return localStore.getTask(id);
+    // Deliberately no read-back: once the copy is written, a transient registry read
+    // failure must not report the duplication as failed — the user would retry under a
+    // different id and end up with two copies. The renderer refreshes the list anyway.
+    return { id: entry.id };
   });
 
   handle('local:importOrphan', async ({ id, cronExpression, fireAt, cwd, model, displayName, enabled }) => {
