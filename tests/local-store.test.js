@@ -255,6 +255,90 @@ test('createTask refuses when another process already holds the reclaim takeover
   assert.ok(fs.existsSync(path.join(dir, '.claim.json.takeover')));
 });
 
+test('createTask reclaims a takeover lock abandoned by a crash mid-recovery', async () => {
+  const dir = path.join(claudeDir, 'scheduled-tasks', 'stale-takeover');
+  writeClaimMarker(dir, deadPid());
+  const takeoverPath = path.join(dir, '.claim.json.takeover');
+  fs.writeFileSync(takeoverPath, '999999');
+  const old = new Date(Date.now() - 20_000); // well past TAKEOVER_LOCK_STALE_MS
+  fs.utimesSync(takeoverPath, old, old);
+  const store = makeStore();
+  const entry = await store.createTask(
+    { id: 'stale-takeover', cronExpression: '0 9 * * *', enabled: false },
+    { description: 'recovered', body: 'recovered body' },
+  );
+  assert.match(fs.readFileSync(entry.filePath, 'utf8'), /description: recovered/);
+});
+
+test('createTask reclaims a marker left corrupt by an interrupted write', async () => {
+  const dir = path.join(claudeDir, 'scheduled-tasks', 'corrupt-marker');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, '.claim.json'), '{"pid": 123, "at": "20'); // truncated mid-write
+  const store = makeStore();
+  const entry = await store.createTask(
+    { id: 'corrupt-marker', cronExpression: '0 9 * * *', enabled: false },
+    { description: 'recovered', body: 'recovered body' },
+  );
+  assert.match(fs.readFileSync(entry.filePath, 'utf8'), /description: recovered/);
+});
+
+test("createTask preserves another process's takeover lock discovered during cleanup", async () => {
+  // Simulates a second process starting to evaluate our just-written marker in the
+  // instant between our own claim succeeding and our cleanup scan.
+  const dir = path.join(claudeDir, 'scheduled-tasks', 'concurrent-takeover');
+  const store = makeStore();
+  const originalReaddirSync = fs.readdirSync;
+  let injected = false;
+  fs.readdirSync = (...args) => {
+    const result = originalReaddirSync(...args);
+    if (!injected && args[0] === dir && result.includes('.claim.json')) {
+      injected = true;
+      fs.writeFileSync(path.join(dir, '.claim.json.takeover'), '424242');
+    }
+    return originalReaddirSync(...args);
+  };
+  try {
+    await store.createTask(
+      { id: 'concurrent-takeover', cronExpression: '0 9 * * *', enabled: false },
+      { description: 'ok', body: 'ok body' },
+    );
+  } finally {
+    fs.readdirSync = originalReaddirSync;
+  }
+  assert.ok(fs.existsSync(path.join(dir, '.claim.json.takeover')));
+});
+
+test('createTask preserves a SKILL.md published moments after a dead-marker takeover', async () => {
+  // Simulates the original (dead) process finishing its publish in the instant between
+  // our own takeover succeeding and our re-check just before the cleanup loop.
+  const dir = path.join(claudeDir, 'scheduled-tasks', 'late-publish');
+  const filePath = path.join(dir, 'SKILL.md');
+  writeClaimMarker(dir, deadPid());
+  const store = makeStore();
+  const originalExistsSync = fs.existsSync;
+  let calls = 0;
+  fs.existsSync = (p) => {
+    if (p === filePath) {
+      calls++;
+      if (calls === 2) {
+        fs.writeFileSync(filePath, '---\nname: late-publish\ndescription: from the other process\n---\n\noriginal content\n');
+      }
+    }
+    return originalExistsSync(p);
+  };
+  try {
+    await assert.rejects(
+      store.createTask({ id: 'late-publish', cronExpression: '0 9 * * *', enabled: false }, { description: '', body: 'x' }),
+      (err) => err.code === 'VALIDATION',
+    );
+  } finally {
+    fs.existsSync = originalExistsSync;
+  }
+  assert.match(fs.readFileSync(filePath, 'utf8'), /from the other process/);
+  // No stray marker should be left pointing at content that's now legitimately published.
+  assert.equal(fs.existsSync(path.join(dir, '.claim.json')), false);
+});
+
 test('createTask removes the claimed dir if the SKILL.md write itself never lands', async () => {
   const store = makeStore();
   const originalOpenSync = fs.openSync;

@@ -23,6 +23,11 @@ const PATCHABLE_FIELDS = ['displayName', 'cronExpression', 'model', 'cwd', 'enab
 // plausible manual user action, would ever create a file with this exact name.
 const CLAIM_MARKER = '.claim.json';
 
+// The takeover lock's own critical section below (read a marker, check a pid, maybe
+// rm+rewrite) is a handful of synchronous fs calls — never legitimately slower than
+// this, so anything older can only be a leftover from a process that died mid-section.
+const TAKEOVER_LOCK_STALE_MS = 10_000;
+
 /** True if `pid` names a currently-running process (best-effort; assumes alive when unsure). */
 function isProcessAlive(pid) {
   try {
@@ -38,12 +43,59 @@ function writeMarkerFile(markerPath) {
 }
 
 /**
+ * True if the marker at `markerPath` can be proven abandoned: a readable pid that's
+ * confirmed no longer running, OR the marker being unreadable/corrupt/gone entirely —
+ * which can only happen if a write to it was interrupted mid-flight (our own writes are
+ * always a single complete JSON payload), meaning its writer is necessarily gone too.
+ */
+function isMarkerAbandoned(markerPath) {
+  let marker;
+  try {
+    marker = JSON.parse(fs.readFileSync(markerPath, 'utf8'));
+  } catch {
+    return true;
+  }
+  return typeof marker.pid !== 'number' || !isProcessAlive(marker.pid);
+}
+
+/**
+ * Acquire `lockPath` exclusively for this process, taking over one left behind by a
+ * crash if it's stale enough that it can only be abandoned (see TAKEOVER_LOCK_STALE_MS).
+ * Returns false if someone else currently — and plausibly still legitimately — holds it.
+ */
+function acquireTakeoverLock(lockPath) {
+  const write = () => fs.writeFileSync(lockPath, String(process.pid), { flag: 'wx' });
+  try {
+    write();
+    return true;
+  } catch (err) {
+    if (err.code !== 'EEXIST') throw err;
+  }
+  let ageMs;
+  try {
+    ageMs = Date.now() - fs.statSync(lockPath).mtimeMs;
+  } catch {
+    ageMs = Infinity; // gone already — safe to (re)claim
+  }
+  if (ageMs <= TAKEOVER_LOCK_STALE_MS) return false;
+  fs.rmSync(lockPath, { force: true });
+  try {
+    write();
+    return true;
+  } catch (err) {
+    if (err.code !== 'EEXIST') throw err;
+    return false; // someone else reclaimed it in the same instant
+  }
+}
+
+/**
  * Exclusively claim `markerPath` for this process. Returns true if we now own it,
- * false if someone else does and it's confirmed still alive (or unreadable/ambiguous).
+ * false if someone else does and it's confirmed still alive (or the takeover decision
+ * is already being made by another concurrent attempt).
  *
  * A plain "read the marker, decide it's dead, delete and replace it" is itself a race:
  * two processes could both read the same dead marker and both decide to take over.
- * The takeover decision is therefore gated by a second exclusive-create — a lock file
+ * The takeover decision is therefore gated by acquireTakeoverLock() — a lock file
  * scoped to this exact marker path — so only its winner is ever allowed to inspect and
  * replace a pre-existing marker; every other simultaneous attempt loses that lock and
  * backs off rather than also acting on what it read.
@@ -56,20 +108,9 @@ function claimMarkerExclusively(markerPath) {
     if (err.code !== 'EEXIST') throw err;
   }
   const takeoverLock = `${markerPath}.takeover`;
+  if (!acquireTakeoverLock(takeoverLock)) return false;
   try {
-    fs.writeFileSync(takeoverLock, String(process.pid), { flag: 'wx' });
-  } catch (err) {
-    if (err.code !== 'EEXIST') throw err;
-    return false; // another process is already deciding this marker's fate
-  }
-  try {
-    let marker;
-    try {
-      marker = JSON.parse(fs.readFileSync(markerPath, 'utf8'));
-    } catch {
-      return false; // unreadable — nothing verifiable, leave it alone
-    }
-    if (typeof marker.pid !== 'number' || isProcessAlive(marker.pid)) return false;
+    if (!isMarkerAbandoned(markerPath)) return false;
     fs.rmSync(markerPath, { force: true });
     writeMarkerFile(markerPath);
     return true;
@@ -281,17 +322,19 @@ function createLocalStore({
   function claimPromptDir(id) {
     fs.mkdirSync(skillsDir, { recursive: true });
     const skillDir = path.join(skillsDir, id);
+    const filePath = path.join(skillDir, 'SKILL.md');
     const refuse = () => {
       throw new AppError(
         'VALIDATION',
         `"${skillDir}" already exists — pick a different id, or register the existing prompt from the orphan list instead of creating a new task`,
       );
     };
-    if (fs.existsSync(path.join(skillDir, 'SKILL.md'))) refuse();
+    if (fs.existsSync(filePath)) refuse();
     fs.mkdirSync(skillDir, { recursive: true });
 
     const markerPath = path.join(skillDir, CLAIM_MARKER);
     const markerName = path.basename(markerPath);
+    const takeoverName = `${markerName}.takeover`;
     const entriesBefore = fs.readdirSync(skillDir);
     if (entriesBefore.length > 0 && !entriesBefore.includes(markerName)) refuse();
 
@@ -306,8 +349,22 @@ function createLocalStore({
       throw err;
     }
     if (!claimed) refuse();
+
+    // A dead claim's owner could have finished publishing SKILL.md an instant before
+    // it was killed, before it got to remove its own marker. Re-check right here, right
+    // before clearing anything, so a stale marker sitting beside already-legitimate
+    // content never causes that content to be destroyed as if it were debris.
+    if (fs.existsSync(filePath)) {
+      fs.rmSync(markerPath, { force: true });
+      refuse();
+    }
     for (const entry of fs.readdirSync(skillDir)) {
-      if (entry !== markerName) fs.rmSync(path.join(skillDir, entry), { recursive: true, force: true });
+      // The marker is ours now. A takeover-lock file can't be ours (claimMarkerExclusively
+      // always removes its own before returning) — it can only belong to another,
+      // still-active concurrent attempt, which must not be disturbed.
+      if (entry !== markerName && entry !== takeoverName) {
+        fs.rmSync(path.join(skillDir, entry), { recursive: true, force: true });
+      }
     }
     return skillDir;
   }
