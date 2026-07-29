@@ -38,12 +38,12 @@ function createOauth({
     return parsed;
   }
 
-  async function refresh() {
+  async function refresh({ force = false } = {}) {
     // Re-read right before refreshing: the CLI may have rotated the tokens already,
     // in which case refreshing with our stale refresh_token would fail.
     const file = await readCredentialsFile();
     const oauth = file.claudeAiOauth;
-    if (oauth.expiresAt - now() > EXPIRY_MARGIN_MS) return oauth.accessToken;
+    if (!force && oauth.expiresAt - now() > EXPIRY_MARGIN_MS) return oauth.accessToken;
 
     let response;
     try {
@@ -96,7 +96,7 @@ function createOauth({
       throw new AppError('AUTH_REFRESH_FAILED', RELOGIN_MESSAGE, 'previous refresh attempt failed; backing off');
     }
     if (!refreshInFlight) {
-      refreshInFlight = refresh().finally(() => {
+      refreshInFlight = refresh({ force }).finally(() => {
         refreshInFlight = null;
       });
     }

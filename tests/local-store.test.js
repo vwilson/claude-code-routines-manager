@@ -138,6 +138,35 @@ test('invalid JSON surfaces as PARSE after retries', async () => {
   await assert.rejects(makeStore().listTasks(), (err) => err.code === 'PARSE');
 });
 
+for (const [label, invalidEnvelope] of [
+  ['missing scheduledTasks', { formatVersion: 99 }],
+  ['non-array scheduledTasks', { formatVersion: 99, scheduledTasks: { alpha: {} } }],
+]) {
+  test(`${label} surfaces as a typed schema error on list without rewriting the registry`, async () => {
+    const bytes = JSON.stringify(invalidEnvelope, null, 4);
+    fs.writeFileSync(registryPath, bytes);
+    await assert.rejects(
+      makeStore().listTasks(),
+      (err) => err.name === 'AppError' && err.code === 'PARSE' && /scheduledTasks.*array/.test(err.message),
+    );
+    assert.equal(fs.readFileSync(registryPath, 'utf8'), bytes);
+  });
+
+  test(`${label} blocks mutations without changing registry or prompt bytes`, async () => {
+    const registryBytes = JSON.stringify(invalidEnvelope, null, 4);
+    const skillPath = path.join(claudeDir, 'scheduled-tasks', 'alpha', 'SKILL.md');
+    const promptBytes = fs.readFileSync(skillPath, 'utf8');
+    fs.writeFileSync(registryPath, registryBytes);
+    await assert.rejects(
+      makeStore().applyUpdate('alpha', { patch: { enabled: false }, promptBody: 'Must not be written.' }),
+      (err) => err.name === 'AppError' && err.code === 'PARSE',
+    );
+    assert.equal(fs.readFileSync(registryPath, 'utf8'), registryBytes);
+    assert.equal(fs.readFileSync(skillPath, 'utf8'), promptBytes);
+    assert.deepEqual(fs.readdirSync(path.dirname(registryPath)).sort(), ['scheduled-tasks.json']);
+  });
+}
+
 test('orphan scan lists unregistered prompt dirs only', async () => {
   writeSkill('orphan-one', 'Orphan prompt.', 'left behind');
   fs.mkdirSync(path.join(claudeDir, 'scheduled-tasks', 'not-a-prompt')); // no SKILL.md -> ignored
@@ -504,6 +533,26 @@ test('setPromptBody replaces the body but keeps frontmatter', async () => {
   assert.equal(frontmatter.description, 'A test task');
 });
 
+test('setPromptBody preserves the original frontmatter block byte-for-byte', async () => {
+  const filePath = path.join(claudeDir, 'scheduled-tasks', 'alpha', 'SKILL.md');
+  const frontmatter = [
+    '---\r\n',
+    '# user-authored comment\r\n',
+    'name: "alpha"\r\n',
+    "description: 'keep: this quoted value'\r\n",
+    'multiline: >-\r\n',
+    '  first line\r\n',
+    '  second line\r\n',
+    'unknown: { nested: true }\r\n',
+    '---',
+  ].join('');
+  fs.writeFileSync(filePath, `${frontmatter}\r\n\r\nOld body.\r\n`);
+
+  await makeStore().setPromptBody('alpha', 'New body.');
+
+  assert.equal(fs.readFileSync(filePath, 'utf8'), `${frontmatter}\r\n\r\nNew body.\r\n`);
+});
+
 test('duplicateTask copies the prompt and inherits unknown fields', async () => {
   const store = makeStore();
   const entry = await store.duplicateTask('alpha', {
@@ -751,31 +800,35 @@ test('applyUpdate renames and patches in the same call', async () => {
   assert.equal(envelope.scheduledTasks[0].displayName, 'Beta Name');
 });
 
-test('applyUpdate rolls back the staged directory move if the combined registry write fails, without ever touching the registry', async () => {
-  // The id rename and the patch commit in one gated registry write; if Desktop is
-  // running, that write never happens at all — so there's nothing to undo on the
-  // registry side, only the filesystem staging (directory move + frontmatter rewrite).
+test('applyUpdate gates registry changes before touching the prompt or directory', async () => {
   const store = createLocalStore({
     appDataDir,
     claudeDir,
     gate: { isDesktopRunning: async () => true },
     now: () => FIXED_NOW,
   });
-  const before = fs.readFileSync(registryPath, 'utf8');
+  const registryBefore = fs.readFileSync(registryPath, 'utf8');
+  const promptPath = path.join(claudeDir, 'scheduled-tasks', 'alpha', 'SKILL.md');
+  const promptBefore = fs.readFileSync(promptPath, 'utf8');
   await assert.rejects(
-    store.applyUpdate('alpha', { newId: 'beta', patch: { displayName: 'Beta Name' } }),
+    store.applyUpdate('alpha', {
+      newId: 'beta',
+      patch: { displayName: 'Beta Name' },
+      promptBody: 'New body that must never be staged.',
+    }),
     (err) => err.code === 'CLAUDE_RUNNING',
   );
-  assert.equal(fs.existsSync(path.join(claudeDir, 'scheduled-tasks', 'alpha', 'SKILL.md')), true);
+  assert.equal(fs.readFileSync(promptPath, 'utf8'), promptBefore);
   assert.equal(fs.existsSync(path.join(claudeDir, 'scheduled-tasks', 'beta')), false);
-  assert.equal(fs.readFileSync(registryPath, 'utf8'), before);
+  assert.equal(fs.readFileSync(registryPath, 'utf8'), registryBefore);
 });
 
-test('applyUpdate restores the staged prompt body and directory move together if the registry write fails', async () => {
+test('applyUpdate restores the staged prompt body and directory move if Desktop starts before the second gate', async () => {
+  let gateCalls = 0;
   const store = createLocalStore({
     appDataDir,
     claudeDir,
-    gate: { isDesktopRunning: async () => true },
+    gate: { isDesktopRunning: async () => ++gateCalls === 2 },
     now: () => FIXED_NOW,
   });
   await assert.rejects(
@@ -795,6 +848,35 @@ test('applyUpdate restores the staged prompt body and directory move together if
   const envelope = JSON.parse(fs.readFileSync(registryPath, 'utf8'));
   assert.equal(envelope.scheduledTasks[0].id, 'alpha');
   assert.equal(envelope.scheduledTasks[0].displayName, undefined);
+});
+
+test('applyUpdate restores the original prompt when the commit-time registry read fails', async () => {
+  let gateCalls = 0;
+  const promptPath = path.join(claudeDir, 'scheduled-tasks', 'alpha', 'SKILL.md');
+  const promptBefore = fs.readFileSync(promptPath, 'utf8');
+  const store = createLocalStore({
+    appDataDir,
+    claudeDir,
+    gate: {
+      isDesktopRunning: async () => {
+        gateCalls += 1;
+        if (gateCalls === 2) fs.writeFileSync(registryPath, '{ corrupt during commit');
+        return false;
+      },
+    },
+    now: () => FIXED_NOW,
+  });
+
+  await assert.rejects(
+    store.applyUpdate('alpha', {
+      patch: { displayName: 'Must not commit' },
+      promptBody: 'New body that must be rolled back.',
+    }),
+    (err) => err.code === 'PARSE',
+  );
+
+  assert.equal(gateCalls, 2);
+  assert.equal(fs.readFileSync(promptPath, 'utf8'), promptBefore);
 });
 
 test('duplicateTask copies the prompt byte-for-byte, repointing only the name', async () => {

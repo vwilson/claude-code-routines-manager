@@ -6,6 +6,8 @@
 // stacks never appear in envelopes; INTERNAL logs to the main-process console only.
 
 const fs = require('node:fs');
+const path = require('node:path');
+const { pathToFileURL } = require('node:url');
 const { ipcMain, dialog, shell, BrowserWindow } = require('electron');
 const { AppError } = require('./errors');
 const cron = require('./cron');
@@ -13,6 +15,7 @@ const moves = require('./moves');
 const translate = require('./translate');
 
 const EXTERNAL_URL_PREFIXES = ['https://claude.ai/', 'https://platform.claude.com/'];
+const APP_PAGE_URL = pathToFileURL(path.join(__dirname, '..', 'renderer', 'index.html')).href;
 
 function toErrorEnvelope(err) {
   if (err instanceof AppError) {
@@ -87,7 +90,24 @@ function requireExistingDir(value, name) {
   return value;
 }
 
-function registerIpc({ gate, cloudApi, localStore }) {
+function isExpectedApplicationFrame(event, expectedAppUrl = APP_PAGE_URL) {
+  try {
+    const frame = event?.senderFrame;
+    if (!frame || frame.top !== frame) return false;
+    const actual = new URL(frame.url);
+    const expected = new URL(expectedAppUrl);
+    // Query/hash-only renderer state is still the same packaged document.
+    actual.hash = '';
+    actual.search = '';
+    expected.hash = '';
+    expected.search = '';
+    return actual.href === expected.href;
+  } catch {
+    return false;
+  }
+}
+
+function registerIpc({ gate, cloudApi, localStore, ipc = ipcMain, expectedAppUrl = APP_PAGE_URL }) {
   // Environment names shown on trigger rows; refreshed by cloud:list.
   let environmentNamesById = new Map();
 
@@ -95,8 +115,11 @@ function registerIpc({ gate, cloudApi, localStore }) {
   const services = { gate, cloudApi, localStore, freshTriggerVM, toErrorEnvelope };
 
   function handle(channel, handler) {
-    ipcMain.handle(channel, async (_event, args) => {
+    ipc.handle(channel, async (event, args) => {
       try {
+        if (!isExpectedApplicationFrame(event, expectedAppUrl)) {
+          throw new AppError('FORBIDDEN', 'IPC calls are only accepted from the packaged application page');
+        }
         return { ok: true, data: await handler(args ?? {}) };
       } catch (err) {
         return { ok: false, error: toErrorEnvelope(err) };
@@ -172,7 +195,7 @@ function registerIpc({ gate, cloudApi, localStore }) {
   });
 
   handle('cloud:list', async () => {
-    const [{ triggers }, environments] = await Promise.all([
+    const [{ triggers, status }, environments] = await Promise.all([
       cloudApi.listTriggers(),
       cloudApi.listEnvironments().catch(() => []),
     ]);
@@ -181,6 +204,7 @@ function registerIpc({ gate, cloudApi, localStore }) {
     return {
       triggers: triggers.map((t) => translate.triggerToVM(t, environmentNamesById)),
       environments: envVMs,
+      status,
     };
   });
 
@@ -308,4 +332,4 @@ function registerIpc({ gate, cloudApi, localStore }) {
   });
 }
 
-module.exports = { registerIpc };
+module.exports = { APP_PAGE_URL, isExpectedApplicationFrame, registerIpc };

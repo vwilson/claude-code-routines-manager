@@ -177,7 +177,9 @@ function createLocalStore({
 
   async function readEnvelope(registryPath) {
     const envelope = await readJsonWithRetry(registryPath);
-    if (!Array.isArray(envelope.scheduledTasks)) envelope.scheduledTasks = [];
+    if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope) || !Array.isArray(envelope.scheduledTasks)) {
+      throw new AppError('PARSE', `${registryPath} has an invalid schema: "scheduledTasks" must be an array`);
+    }
     return envelope;
   }
 
@@ -293,12 +295,15 @@ function createLocalStore({
   /** The actual SKILL.md content write, shared by setPromptBody and applyUpdate (which
    * writes to a task mid-rename, before the registry can be looked up by its new id). */
   async function writePromptContent(filePath, id, promptBody) {
-    const existing = readSkill(filePath);
-    const content = translate.buildSkillMd({
-      name: existing?.frontmatter.name ?? id,
-      description: existing?.frontmatter.description ?? '',
-      body: promptBody,
-    });
+    let existingRaw;
+    try {
+      existingRaw = fs.readFileSync(filePath, 'utf8');
+    } catch {
+      existingRaw = undefined;
+    }
+    const content =
+      (existingRaw !== undefined && translate.replaceSkillBody(existingRaw, promptBody)) ||
+      translate.buildSkillMd({ name: id, description: '', body: promptBody });
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     await atomicWriteFile(filePath, content);
   }
@@ -604,6 +609,18 @@ function createLocalStore({
     if (!task) throw new AppError('NOT_FOUND', `no local task "${id}"`);
 
     const willRename = newId !== undefined && newId !== id;
+    const willPatch = Boolean(patch && Object.keys(patch).length > 0);
+    if (willRename || willPatch) {
+      // This first fresh gate protects the filesystem staging below. mutateRegistry()
+      // deliberately gates again immediately before its read/write to catch Desktop
+      // starting during the staging window.
+      if (await gate.isDesktopRunning({ fresh: true })) {
+        throw new AppError(
+          'CLAUDE_RUNNING',
+          'Claude Desktop is running — local registry changes would be lost. Close it (including the tray icon) first.',
+        );
+      }
+    }
     const move = willRename ? await moveTaskDir(task, newId, tasks) : null;
     const currentId = willRename ? newId : id;
     const filePath = willRename ? move.newFilePath : task.filePath;
@@ -621,7 +638,7 @@ function createLocalStore({
         promptRewritten = true;
       }
 
-      if (willRename || (patch && Object.keys(patch).length > 0)) {
+      if (willRename || willPatch) {
         await mutateRegistry((envelope) => {
           const entry = envelope.scheduledTasks.find((t) => t.id === id);
           if (!entry) throw new AppError('NOT_FOUND', `no local task "${id}" in the registry (it may have changed externally)`);

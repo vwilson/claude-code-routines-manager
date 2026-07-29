@@ -12,11 +12,12 @@ const ENVIRONMENTS_BETA = 'environments-2025-11-01';
 const USER_AGENT = 'claude-cli/2.1.215 (external, cc-routines-manager)';
 const TIMEOUT_MS = 30_000;
 const MAX_ENV_PAGES = 5;
+const MAX_TRIGGER_PAGES = 25;
 
 function createCloudApi({ oauth, fetchImpl = fetch } = {}) {
-  async function send(method, apiPath, { body, beta } = {}) {
+  async function send(method, apiPath, accessToken, { body, beta } = {}) {
     const headers = {
-      Authorization: `Bearer ${await oauth.getAccessToken()}`,
+      Authorization: `Bearer ${accessToken}`,
       'anthropic-version': '2023-06-01',
       'x-organization-uuid': oauth.getOrgUuid(),
       'User-Agent': USER_AGENT,
@@ -38,11 +39,12 @@ function createCloudApi({ oauth, fetchImpl = fetch } = {}) {
   }
 
   async function request(method, apiPath, options = {}) {
-    let response = await send(method, apiPath, options);
+    let accessToken = await oauth.getAccessToken();
+    let response = await send(method, apiPath, accessToken, options);
     if (response.status === 401) {
       // The token may have just expired (or been rotated by the CLI); refresh once and retry.
-      await oauth.getAccessToken({ force: true });
-      response = await send(method, apiPath, options);
+      accessToken = await oauth.getAccessToken({ force: true });
+      response = await send(method, apiPath, accessToken, options);
     }
     const text = await response.text();
     let parsed;
@@ -66,9 +68,80 @@ function createCloudApi({ oauth, fetchImpl = fetch } = {}) {
   // Single-trigger endpoints wrap the object: { trigger: {...} }.
   const unwrapTrigger = (data) => data.trigger ?? data;
 
+  const completeTriggerList = (pagesFetched) => ({
+    complete: true,
+    reason: null,
+    warning: null,
+    pagesFetched,
+  });
+
+  const incompleteTriggerList = (reason, warning, pagesFetched) => ({
+    complete: false,
+    reason,
+    warning,
+    pagesFetched,
+  });
+
+  /**
+   * Returns every fetched trigger plus status metadata. `status.warning` is
+   * ready for display when malformed pagination or the safety bound makes the
+   * result incomplete.
+   */
   async function listTriggers() {
-    const data = await request('GET', triggers(), { beta: TRIGGERS_BETA });
-    return { triggers: data.data ?? [], hasMore: Boolean(data.has_more) };
+    const allTriggers = [];
+    const seenCursors = new Set();
+    let afterId;
+
+    for (let page = 0; page < MAX_TRIGGER_PAGES; page++) {
+      const query = afterId ? `?after_id=${encodeURIComponent(afterId)}` : '';
+      const data = await request('GET', triggers(query), { beta: TRIGGERS_BETA });
+      const pagesFetched = page + 1;
+      const batch = data.data;
+
+      if (!Array.isArray(batch)) {
+        return {
+          triggers: allTriggers,
+          status: incompleteTriggerList(
+            'malformed-pagination',
+            'Cloud routines list is incomplete because the API returned malformed pagination data.',
+            pagesFetched,
+          ),
+        };
+      }
+      allTriggers.push(...batch);
+
+      if (data.has_more === false) {
+        return { triggers: allTriggers, status: completeTriggerList(pagesFetched) };
+      }
+      if (
+        data.has_more !== true ||
+        typeof data.last_id !== 'string' ||
+        data.last_id === '' ||
+        batch.length === 0 ||
+        seenCursors.has(data.last_id)
+      ) {
+        return {
+          triggers: allTriggers,
+          status: incompleteTriggerList(
+            'malformed-pagination',
+            'Cloud routines list is incomplete because the API returned malformed pagination data.',
+            pagesFetched,
+          ),
+        };
+      }
+
+      seenCursors.add(data.last_id);
+      afterId = data.last_id;
+    }
+
+    return {
+      triggers: allTriggers,
+      status: incompleteTriggerList(
+        'page-limit',
+        `Cloud routines list is incomplete because the safety limit of ${MAX_TRIGGER_PAGES} pages was reached.`,
+        MAX_TRIGGER_PAGES,
+      ),
+    };
   }
 
   async function getTrigger(id) {

@@ -181,6 +181,27 @@ test('buildSkillMd -> parseSkillMd round-trips the body', () => {
   assert.equal(body, 'Prompt body.\n\nMore.\n');
 });
 
+test('replaceSkillBody preserves a complex frontmatter block byte-for-byte', () => {
+  const frontmatter = [
+    '---\r\n',
+    '# keep this comment\r\n',
+    'name: "alpha"\r\n',
+    "description: 'quoted: value'\r\n",
+    'instructions: |\r\n',
+    '  first line\r\n',
+    '  second line\r\n',
+    'unknown-key: [one, two]\r\n',
+    '---',
+  ].join('');
+  const original = `${frontmatter}\r\n\r\nOld body.\r\n`;
+  assert.equal(translate.replaceSkillBody(original, 'New body.'), `${frontmatter}\r\n\r\nNew body.\r\n`);
+});
+
+test('replaceSkillBody declines files without a complete frontmatter block', () => {
+  assert.equal(translate.replaceSkillBody('Bare body.', 'New body.'), null);
+  assert.equal(translate.replaceSkillBody('---\nname: alpha\nNo closing delimiter', 'New body.'), null);
+});
+
 test('buildTriggerDuplicateBody reuses job_config with fresh event identity', () => {
   const trigger = {
     id: 'trg_1',
