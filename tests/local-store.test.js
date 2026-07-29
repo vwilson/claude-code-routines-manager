@@ -294,7 +294,8 @@ test('applyUpdate renames and patches in the same call', async () => {
 
 test('applyUpdate rolls back the rename if the subsequent patch fails', async () => {
   let calls = 0;
-  // false, false (the rename's two gate checks) -> true (updateTask's check fails) -> false, false (rollback rename succeeds)
+  // false, false (the forward rename's two gate checks) -> true (updateTask's check fails).
+  // The rollback rename runs with skipGateCheck, so it makes no further gate calls at all.
   const store = createLocalStore({
     appDataDir,
     claudeDir,
@@ -307,6 +308,52 @@ test('applyUpdate rolls back the rename if the subsequent patch fails', async ()
   );
   assert.equal(fs.existsSync(path.join(claudeDir, 'scheduled-tasks', 'alpha', 'SKILL.md')), true);
   assert.equal(fs.existsSync(path.join(claudeDir, 'scheduled-tasks', 'beta')), false);
+  const envelope = JSON.parse(fs.readFileSync(registryPath, 'utf8'));
+  assert.equal(envelope.scheduledTasks[0].id, 'alpha');
+  assert.equal(envelope.scheduledTasks[0].displayName, undefined);
+});
+
+test('applyUpdate rolls the rename back even while Claude Desktop stays running throughout', async () => {
+  // Unlike the previous test (Desktop flips "running" for exactly one check), Desktop
+  // is running for the failing patch update AND every check after — the rollback must
+  // still succeed because it never consults the gate at all (skipGateCheck).
+  let calls = 0;
+  const store = createLocalStore({
+    appDataDir,
+    claudeDir,
+    gate: { isDesktopRunning: async () => ++calls >= 3 },
+    now: () => FIXED_NOW,
+  });
+  await assert.rejects(
+    store.applyUpdate('alpha', { newId: 'beta', patch: { displayName: 'Beta Name' } }),
+    (err) => err.code === 'CLAUDE_RUNNING',
+  );
+  assert.equal(fs.existsSync(path.join(claudeDir, 'scheduled-tasks', 'alpha', 'SKILL.md')), true);
+  assert.equal(fs.existsSync(path.join(claudeDir, 'scheduled-tasks', 'beta')), false);
+});
+
+test('applyUpdate restores the original prompt body if the subsequent patch update fails', async () => {
+  let calls = 0;
+  const store = createLocalStore({
+    appDataDir,
+    claudeDir,
+    gate: { isDesktopRunning: async () => ++calls === 3 },
+    now: () => FIXED_NOW,
+  });
+  await assert.rejects(
+    store.applyUpdate('alpha', {
+      newId: 'beta',
+      patch: { displayName: 'Beta Name' },
+      promptBody: 'New body that should not stick.',
+    }),
+    (err) => err.code === 'CLAUDE_RUNNING',
+  );
+  assert.equal(fs.existsSync(path.join(claudeDir, 'scheduled-tasks', 'alpha', 'SKILL.md')), true);
+  assert.equal(fs.existsSync(path.join(claudeDir, 'scheduled-tasks', 'beta')), false);
+  const skill = fs.readFileSync(path.join(claudeDir, 'scheduled-tasks', 'alpha', 'SKILL.md'), 'utf8');
+  assert.match(skill, /name: alpha/);
+  assert.match(skill, /Prompt body\./);
+  assert.doesNotMatch(skill, /New body that should not stick\./);
   const envelope = JSON.parse(fs.readFileSync(registryPath, 'utf8'));
   assert.equal(envelope.scheduledTasks[0].id, 'alpha');
   assert.equal(envelope.scheduledTasks[0].displayName, undefined);

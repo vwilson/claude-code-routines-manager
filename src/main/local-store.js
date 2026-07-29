@@ -150,10 +150,12 @@ function createLocalStore({
   /**
    * The single registry write path. `mutator` receives the freshly-parsed envelope
    * and mutates it in place; everything it does not touch round-trips byte-for-byte
-   * (modulo JSON formatting).
+   * (modulo JSON formatting). `skipGateCheck` is only for best-effort rollback paths
+   * that must run even if Desktop started mid-transaction — see renameTask's use in
+   * applyUpdate's rollback.
    */
-  async function mutateRegistry(mutator) {
-    if (await gate.isDesktopRunning({ fresh: true })) {
+  async function mutateRegistry(mutator, { skipGateCheck = false } = {}) {
+    if (!skipGateCheck && (await gate.isDesktopRunning({ fresh: true }))) {
       throw new AppError('CLAUDE_RUNNING', 'Claude Desktop is running — local registry changes would be lost. Close it (including the tray icon) first.');
     }
     const registryPath = requireRegistry();
@@ -167,7 +169,7 @@ function createLocalStore({
     await atomicWriteFile(registryPath, JSON.stringify(envelope, null, 2));
   }
 
-  async function updateTask(id, patch) {
+  async function updateTask(id, patch, { skipGateCheck = false } = {}) {
     let updated;
     await mutateRegistry((envelope) => {
       const task = envelope.scheduledTasks.find((t) => t.id === id);
@@ -176,7 +178,7 @@ function createLocalStore({
         if (patch[key] !== undefined) task[key] = patch[key];
       }
       updated = task;
-    });
+    }, { skipGateCheck });
     return updated;
   }
 
@@ -236,9 +238,12 @@ function createLocalStore({
    * Rename a task's id: moves ~\.claude\scheduled-tasks\<id> to the new id (carrying
    * SKILL.md and anything else in the dir along with it), then updates the registry
    * entry's id and filePath. Rolls the directory move back if the registry write fails.
+   * `skipGateCheck` is for rollback-only use (see applyUpdate): forwarded to the
+   * internal registry write too, so a best-effort undo isn't blocked by the same
+   * Desktop-running check that made the forward operation fail partway through.
    */
-  async function renameTask(oldId, newId) {
-    if (await gate.isDesktopRunning({ fresh: true })) {
+  async function renameTask(oldId, newId, { skipGateCheck = false } = {}) {
+    if (!skipGateCheck && (await gate.isDesktopRunning({ fresh: true }))) {
       throw new AppError('CLAUDE_RUNNING', 'Claude Desktop is running — close it before renaming local tasks.');
     }
     const tasks = await readTasksRaw();
@@ -279,7 +284,7 @@ function createLocalStore({
           envelope.recordedSkips[newId] = envelope.recordedSkips[oldId];
           delete envelope.recordedSkips[oldId];
         }
-      });
+      }, { skipGateCheck });
     } catch (err) {
       if (contentRewritten) {
         try {
@@ -296,19 +301,39 @@ function createLocalStore({
 
   /**
    * Combined drawer save: rename (if `newId` differs), then write the prompt body
-   * and/or patch fields. If a later step fails after the rename already landed, the
-   * rename is rolled back (renameTask is symmetric) so the caller keeps addressing a
-   * task that still exists under its original id, instead of one now-missing on both sides.
+   * and/or patch fields. If a later step fails after the rename already landed, both
+   * the prompt body and the rename are rolled back so the caller keeps addressing a
+   * task that still exists, unedited, under its original id — instead of one that's
+   * missing on both sides, or silently carrying an edit the save reported as failed.
+   * The rollback rename runs with skipGateCheck so a Desktop-running race that broke
+   * the forward save can't also block undoing it.
    */
   async function applyUpdate(id, { newId, patch, promptBody } = {}) {
     const willRename = newId !== undefined && newId !== id;
     if (willRename) await renameTask(id, newId);
     const currentId = willRename ? newId : id;
+
+    let originalPromptRaw;
+    let promptRewritten = false;
     try {
-      if (promptBody !== undefined) await setPromptBody(currentId, promptBody);
+      if (promptBody !== undefined) {
+        const task = (await readTasksRaw()).find((t) => t.id === currentId);
+        if (!task) throw new AppError('NOT_FOUND', `no local task "${currentId}"`);
+        try {
+          originalPromptRaw = fs.readFileSync(task.filePath, 'utf8');
+        } catch {
+          originalPromptRaw = undefined; // no existing file to restore
+        }
+        await setPromptBody(currentId, promptBody);
+        promptRewritten = true;
+      }
       if (patch && Object.keys(patch).length > 0) await updateTask(currentId, patch);
     } catch (err) {
-      if (willRename) await renameTask(currentId, id).catch(() => {});
+      if (promptRewritten && originalPromptRaw !== undefined) {
+        const task = (await readTasksRaw()).find((t) => t.id === currentId);
+        if (task) await atomicWriteFile(task.filePath, originalPromptRaw).catch(() => {});
+      }
+      if (willRename) await renameTask(currentId, id, { skipGateCheck: true }).catch(() => {});
       throw err;
     }
     return getTask(currentId);
