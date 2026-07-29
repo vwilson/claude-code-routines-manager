@@ -16,6 +16,11 @@
   box-sizing: border-box;
 }
 
+/* Our #drawer display rule would otherwise beat the UA's [hidden] default. */
+[hidden] {
+  display: none !important;
+}
+
 body {
   margin: 0;
   background: var(--bg);
@@ -34,6 +39,7 @@ h1 {
 h2 {
   font-size: 0.95rem;
   margin: 0;
+  white-space: nowrap;
 }
 
 button {
