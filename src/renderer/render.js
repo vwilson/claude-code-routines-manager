@@ -38,6 +38,15 @@ export function formatTime(iso) {
   return Number.isNaN(date.getTime()) ? String(iso) : timeFormat.format(date);
 }
 
+/** ISO instant -> the `YYYY-MM-DDTHH:mm` local-time value a datetime-local input wants. */
+export function toDatetimeLocalValue(iso) {
+  if (!iso) return '';
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return '';
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
 function badge(text, warn = false) {
   return el('span', { class: warn ? 'badge warn' : 'badge' }, text);
 }
@@ -211,6 +220,7 @@ export function localDrawer({ task, promptBody }) {
         'div',
         { class: 'drawer-actions' },
         el('button', { type: 'submit', class: 'primary' }, 'Save'),
+        el('button', { type: 'button', dataset: { action: 'duplicate-local', id: task.id } }, 'Duplicate…'),
         el('button', { type: 'button', dataset: { action: 'move-start', direction: 'l2c', id: task.id } }, 'Move to Cloud…'),
       ),
     ),
@@ -261,6 +271,7 @@ export function cloudDrawer(trigger, environments) {
         { class: 'drawer-actions' },
         el('button', { type: 'submit', class: 'primary' }, 'Save'),
         el('button', { type: 'button', dataset: { action: 'run-cloud', id: trigger.id } }, 'Run now'),
+        el('button', { type: 'button', dataset: { action: 'duplicate-cloud', id: trigger.id } }, 'Duplicate…'),
         el('button', { type: 'button', dataset: { action: 'move-start', direction: 'c2l', id: trigger.id } }, 'Move to Local…'),
         el(
           'button',
@@ -316,12 +327,7 @@ export function moveCloudToLocalDialog(preview, { triggerId }) {
     preview.fireAt ? null : schedulePreviewCols(preview.nextRuns, 'Cloud schedule (now)', 'Local schedule (after move)'),
     el('ul', { class: 'warnings' }, preview.warnings.map((w) => el('li', {}, w))),
     el('div', { class: 'form-error', dataset: { formError: '' } }),
-    el(
-      'div',
-      { class: 'dialog-actions' },
-      el('button', { type: 'button', dataset: { action: 'modal-close' } }, 'Cancel'),
-      el('button', { type: 'submit', class: 'primary' }, 'Move'),
-    ),
+    dialogActions('Move'),
   );
 }
 
@@ -359,12 +365,7 @@ export function moveLocalToCloudDialog(preview, { taskId, desktopRunning }) {
     preview.runOnceAt ? null : schedulePreviewCols(preview.nextRuns, 'Local schedule (now)', 'Cloud schedule (after move)'),
     el('ul', { class: 'warnings' }, preview.warnings.map((w) => el('li', {}, w))),
     el('div', { class: 'form-error', dataset: { formError: '' } }),
-    el(
-      'div',
-      { class: 'dialog-actions' },
-      el('button', { type: 'button', dataset: { action: 'modal-close' } }, 'Cancel'),
-      el('button', { type: 'submit', class: 'primary' }, 'Move'),
-    ),
+    dialogActions('Move'),
   );
 }
 
@@ -392,6 +393,81 @@ export function moveResultPanel({ createdLabel, disableLabel, sourceDisabled, di
   );
 }
 
+function dialogActions(submitLabel) {
+  return el(
+    'div',
+    { class: 'dialog-actions' },
+    el('button', { type: 'button', dataset: { action: 'modal-close' } }, 'Cancel'),
+    el('button', { type: 'submit', class: 'primary' }, submitLabel),
+  );
+}
+
+/** Duplicate dialog for a local task. `task` = the LocalTaskVM being copied. */
+export function duplicateLocalDialog(task, suggestedId) {
+  const oneShot = Boolean(task.fireAt) && !task.cronExpression;
+  const futureFireAt = task.fireAt && new Date(task.fireAt).getTime() > Date.now();
+  return el('form', { id: 'modal-form', dataset: { kind: 'duplicate-local', sourceId: task.id } },
+    el('h2', {}, `Duplicate "${task.displayName || task.id}"`),
+    field('New local task id', el('input', { name: 'id', value: suggestedId, spellcheck: 'false' })),
+    field('Display name', el('input', { name: 'displayName', value: `${task.displayName || task.id} (copy)` })),
+    oneShot
+      ? field('One-shot (local time)', el('input', { name: 'fireAt', type: 'datetime-local', value: futureFireAt ? toDatetimeLocalValue(task.fireAt) : '' }))
+      : cronField('cronExpression', task.cronExpression, { utc: false }),
+    field(
+      'Working directory',
+      el(
+        'div',
+        { class: 'field-row' },
+        el('input', { name: 'cwd', value: task.cwd ?? '', spellcheck: 'false' }),
+        el('button', { type: 'button', dataset: { action: 'pick-cwd', target: 'cwd' } }, 'Browse…'),
+      ),
+    ),
+    field('Model', el('input', { name: 'model', value: task.model ?? '', list: 'models' })),
+    el('label', { class: 'field-row' }, el('input', { type: 'checkbox', name: 'enabled' }), 'Enable the copy immediately'),
+    el(
+      'ul',
+      { class: 'warnings' },
+      el('li', {}, 'the prompt is copied as it is on disk now — later edits to either copy are independent'),
+      el('li', {}, 'Claude Desktop must be restarted before it schedules the copy'),
+      oneShot && !futureFireAt ? el('li', {}, 'the original has already fired — pick a future time for the copy') : null,
+    ),
+    el('div', { class: 'form-error', dataset: { formError: '' } }),
+    dialogActions('Duplicate'),
+  );
+}
+
+/** Duplicate dialog for a cloud routine. `trigger` = the TriggerVM being copied. */
+export function duplicateCloudDialog(trigger) {
+  const oneShot = !trigger.cronExpression;
+  const futureRunOnce = trigger.runOnceAt && new Date(trigger.runOnceAt).getTime() > Date.now();
+  return el('form', { id: 'modal-form', dataset: { kind: 'duplicate-cloud', sourceId: trigger.id } },
+    el('h2', {}, `Duplicate "${trigger.name || trigger.id}"`),
+    field('Routine name', el('input', { name: 'name', value: `${trigger.name || trigger.id} (copy)` })),
+    oneShot
+      ? field('Runs once at (local time)', el('input', { name: 'runOnceAt', type: 'datetime-local', value: futureRunOnce ? toDatetimeLocalValue(trigger.runOnceAt) : '' }))
+      : cronField('cronExpression', trigger.cronExpression, { utc: true }),
+    kvList([
+      ['environment', trigger.environmentName ?? trigger.environmentId],
+      ['repo', trigger.repoUrl],
+      ['model', trigger.model],
+      ['allowed tools', trigger.allowedTools.join(', ')],
+    ]),
+    el('label', { class: 'field-row' }, el('input', { type: 'checkbox', name: 'enabled' }), 'Enable the copy immediately'),
+    el(
+      'ul',
+      { class: 'warnings' },
+      el('li', {}, 'environment, repository, model, allowed tools and prompt are copied — edit them on the copy afterwards'),
+      el('li', {}, 'notification settings are not copied'),
+      trigger.mcpConnections.length > 0
+        ? el('li', {}, `${trigger.mcpConnections.length} MCP connection(s) are not copied`)
+        : null,
+      oneShot && !futureRunOnce ? el('li', {}, 'the original has already fired — pick a new time for the copy') : null,
+    ),
+    el('div', { class: 'form-error', dataset: { formError: '' } }),
+    dialogActions('Duplicate'),
+  );
+}
+
 /** Register-orphan dialog. */
 export function orphanDialog(orphan) {
   return el('form', { id: 'modal-form', dataset: { kind: 'orphan-import', id: orphan.id } },
@@ -413,11 +489,6 @@ export function orphanDialog(orphan) {
     field('Model', el('input', { name: 'model', value: '', list: 'models' })),
     el('label', { class: 'field-row' }, el('input', { type: 'checkbox', name: 'enabled' }), 'Enable immediately'),
     el('div', { class: 'form-error', dataset: { formError: '' } }),
-    el(
-      'div',
-      { class: 'dialog-actions' },
-      el('button', { type: 'button', dataset: { action: 'modal-close' } }, 'Cancel'),
-      el('button', { type: 'submit', class: 'primary' }, 'Register'),
-    ),
+    dialogActions('Register'),
   );
 }

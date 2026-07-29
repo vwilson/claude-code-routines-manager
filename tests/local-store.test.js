@@ -191,6 +191,152 @@ test('setPromptBody replaces the body but keeps frontmatter', async () => {
   assert.equal(frontmatter.description, 'A test task');
 });
 
+test('duplicateTask copies the prompt and inherits unknown fields', async () => {
+  const store = makeStore();
+  const entry = await store.duplicateTask('alpha', {
+    id: 'alpha-copy',
+    cronExpression: '0 9 * * 1',
+    displayName: 'Alpha (copy)',
+    enabled: false,
+  });
+  assert.equal(entry.cronExpression, '0 9 * * 1');
+  assert.equal(entry.enabled, false);
+  assert.equal(entry.createdAt, FIXED_NOW.getTime());
+  assert.deepEqual(entry.mysteryField, { nested: true }); // inherited from the source
+  assert.equal(entry.cwd, path.join(root, 'repo')); // inherited when the spec omits it
+
+  const envelope = JSON.parse(fs.readFileSync(registryPath, 'utf8'));
+  assert.deepEqual(envelope.scheduledTasks.map((t) => t.id), ['alpha', 'alpha-copy']);
+  const copy = envelope.scheduledTasks[1];
+  assert.equal(copy.filePath, path.join(claudeDir, 'scheduled-tasks', 'alpha-copy', 'SKILL.md'));
+  const skill = fs.readFileSync(copy.filePath, 'utf8');
+  assert.match(skill, /name: alpha-copy/);
+  assert.match(skill, /description: A test task/);
+  assert.match(skill, /Prompt body\./);
+  // the source is untouched
+  assert.deepEqual(envelope.scheduledTasks[0], JSON.parse(fs.readFileSync(`${registryPath}.bak-20260729-120000`, 'utf8')).scheduledTasks[0]);
+});
+
+test('duplicateTask drops run state and the schedule the copy does not use', async () => {
+  const envelope = JSON.parse(fs.readFileSync(registryPath, 'utf8'));
+  envelope.scheduledTasks[0].lastRunAt = 1785272373487;
+  envelope.scheduledTasks[0].lastScheduledFor = 1785272373487;
+  fs.writeFileSync(registryPath, JSON.stringify(envelope, null, 2));
+  const entry = await makeStore().duplicateTask('alpha', {
+    id: 'alpha-once',
+    fireAt: '2026-08-01T10:00:00.000Z',
+    enabled: true,
+  });
+  assert.equal(entry.lastRunAt, undefined);
+  assert.equal(entry.lastScheduledFor, undefined);
+  assert.equal(entry.cronExpression, undefined);
+  assert.equal(entry.fireAt, '2026-08-01T10:00:00.000Z');
+  assert.equal(entry.displayName, undefined);
+});
+
+test('duplicateTask overrides cwd, model and display name when given', async () => {
+  const entry = await makeStore().duplicateTask('alpha', {
+    id: 'alpha-copy',
+    cronExpression: '0 9 * * 1',
+    cwd: root,
+    model: 'claude-opus-5',
+    displayName: 'Renamed',
+    enabled: false,
+  });
+  assert.equal(entry.cwd, root);
+  assert.equal(entry.model, 'claude-opus-5');
+  assert.equal(entry.displayName, 'Renamed');
+});
+
+test('duplicateTask refuses unknown sources, taken ids and existing prompt dirs', async () => {
+  const store = makeStore();
+  const spec = { id: 'alpha-copy', cronExpression: '0 9 * * 1', enabled: false };
+  await assert.rejects(store.duplicateTask('nope', spec), (err) => err.code === 'NOT_FOUND');
+  await assert.rejects(store.duplicateTask('alpha', { ...spec, id: 'alpha' }), (err) => err.code === 'VALIDATION');
+  await assert.rejects(store.duplicateTask('alpha', { ...spec, id: 'Bad Id!' }), (err) => err.code === 'VALIDATION');
+  writeSkill('alpha-copy');
+  await assert.rejects(store.duplicateTask('alpha', spec), (err) => err.code === 'VALIDATION');
+});
+
+test('duplicateTask refuses a source whose prompt cannot be read', async () => {
+  fs.rmSync(path.join(claudeDir, 'scheduled-tasks', 'alpha'), { recursive: true, force: true });
+  const before = fs.readFileSync(registryPath, 'utf8');
+  await assert.rejects(
+    makeStore().duplicateTask('alpha', { id: 'alpha-copy', cronExpression: '0 9 * * 1', enabled: false }),
+    (err) => err.code === 'NOT_FOUND' && /nothing to copy/.test(err.message),
+  );
+  assert.equal(fs.readFileSync(registryPath, 'utf8'), before);
+  assert.equal(fs.existsSync(path.join(claudeDir, 'scheduled-tasks', 'alpha-copy')), false);
+});
+
+test('duplicateTask never deletes a prompt another writer owns', async () => {
+  // Stand in for a second app instance winning the race: the id is taken in the registry
+  // by the time we try to write, but the prompt on disk belongs to that winner.
+  const store = createLocalStore({
+    appDataDir,
+    claudeDir,
+    gate: { isDesktopRunning: async () => false },
+    now: () => FIXED_NOW,
+  });
+  const winnerSkill = writeSkill('alpha-copy', 'Winner body.');
+  // A sibling file stands in for anything else the winner put in that directory: losing
+  // the claim must not recursively delete the directory, whoever created it.
+  const sibling = path.join(claudeDir, 'scheduled-tasks', 'alpha-copy', 'notes.md');
+  fs.writeFileSync(sibling, 'winner notes');
+  await assert.rejects(
+    store.duplicateTask('alpha', { id: 'alpha-copy', cronExpression: '0 9 * * 1', enabled: false }),
+    (err) => err.code === 'VALIDATION',
+  );
+  assert.match(fs.readFileSync(winnerSkill, 'utf8'), /Winner body\./);
+  assert.equal(fs.readFileSync(sibling, 'utf8'), 'winner notes');
+});
+
+test('duplicateTask rollback keeps a directory that is not empty', async () => {
+  let calls = 0;
+  const store = createLocalStore({
+    appDataDir,
+    claudeDir,
+    gate: { isDesktopRunning: async () => calls++ > 0 }, // desktop launches mid-duplicate
+    now: () => FIXED_NOW,
+  });
+  const dir = path.join(claudeDir, 'scheduled-tasks', 'alpha-copy');
+  fs.mkdirSync(dir, { recursive: true });
+  const sibling = path.join(dir, 'notes.md');
+  fs.writeFileSync(sibling, 'someone else was here');
+  await assert.rejects(
+    store.duplicateTask('alpha', { id: 'alpha-copy', cronExpression: '0 9 * * 1', enabled: false }),
+    (err) => err.code === 'CLAUDE_RUNNING',
+  );
+  assert.equal(fs.existsSync(path.join(dir, 'SKILL.md')), false); // our claim is taken back
+  assert.equal(fs.readFileSync(sibling, 'utf8'), 'someone else was here'); // theirs is not
+});
+
+test('duplicateTask is blocked while Claude Desktop runs, writing nothing', async () => {
+  gateState = true;
+  const before = fs.readFileSync(registryPath, 'utf8');
+  await assert.rejects(
+    makeStore().duplicateTask('alpha', { id: 'alpha-copy', cronExpression: '0 9 * * 1', enabled: false }),
+    (err) => err.code === 'CLAUDE_RUNNING',
+  );
+  assert.equal(fs.readFileSync(registryPath, 'utf8'), before);
+  assert.equal(fs.existsSync(path.join(claudeDir, 'scheduled-tasks', 'alpha-copy')), false);
+});
+
+test('duplicateTask removes the new prompt dir if the registry write fails', async () => {
+  let calls = 0;
+  const store = createLocalStore({
+    appDataDir,
+    claudeDir,
+    gate: { isDesktopRunning: async () => calls++ > 0 }, // desktop launches mid-duplicate
+    now: () => FIXED_NOW,
+  });
+  await assert.rejects(
+    store.duplicateTask('alpha', { id: 'alpha-copy', cronExpression: '0 9 * * 1', enabled: false }),
+    (err) => err.code === 'CLAUDE_RUNNING',
+  );
+  assert.equal(fs.existsSync(path.join(claudeDir, 'scheduled-tasks', 'alpha-copy')), false);
+});
+
 test('renameTask moves the prompt dir and updates the registry entry', async () => {
   const store = makeStore();
   const result = await store.renameTask('alpha', 'beta');
@@ -336,4 +482,16 @@ test('applyUpdate restores the staged prompt body and directory move together if
   const envelope = JSON.parse(fs.readFileSync(registryPath, 'utf8'));
   assert.equal(envelope.scheduledTasks[0].id, 'alpha');
   assert.equal(envelope.scheduledTasks[0].displayName, undefined);
+});
+
+test('duplicateTask copies the prompt byte-for-byte, repointing only the name', async () => {
+  const dir = path.join(claudeDir, 'scheduled-tasks', 'alpha');
+  const content = '---\nname: alpha\ndescription: A test task\nextra: keep-me\n---\n\n  Indented body.\n';
+  fs.writeFileSync(path.join(dir, 'SKILL.md'), content);
+  const entry = await makeStore().duplicateTask('alpha', {
+    id: 'alpha-copy',
+    cronExpression: '0 9 * * 1',
+    enabled: false,
+  });
+  assert.equal(fs.readFileSync(entry.filePath, 'utf8'), content.replace('name: alpha', 'name: alpha-copy'));
 });

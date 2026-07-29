@@ -300,6 +300,35 @@ async function openMoveDialog(direction, sourceId) {
   form.querySelectorAll('[data-cron-preview]').forEach((input) => updateCronPreview(input));
 }
 
+/**
+ * "alpha" -> "alpha-copy", then "alpha-copy-2", … Orphans count as taken too: their
+ * prompt dir already occupies the id, so the store would reject it on submit.
+ */
+function suggestCopyId(sourceId, existingIds) {
+  const taken = new Set(existingIds);
+  const base = `${sourceId}-copy`;
+  if (!taken.has(base)) return base;
+  for (let n = 2; ; n++) {
+    if (!taken.has(`${base}-${n}`)) return `${base}-${n}`;
+  }
+}
+
+async function openDuplicateDialog(kind, id) {
+  const modal = $('#modal');
+  if (kind === 'local') {
+    const { task } = await call('localGet', { id });
+    const taken = [
+      ...(state.local?.tasks ?? []).map((t) => t.id),
+      ...(state.local?.orphans ?? []).map((o) => o.id),
+    ];
+    modal.replaceChildren(ui.duplicateLocalDialog(task, suggestCopyId(task.id, taken)));
+  } else {
+    modal.replaceChildren(ui.duplicateCloudDialog(await call('cloudGet', { id })));
+  }
+  modal.showModal();
+  modal.querySelectorAll('[data-cron-preview]').forEach((input) => updateCronPreview(input));
+}
+
 function openOrphanDialog(id) {
   const orphan = state.local?.orphans.find((o) => o.id === id);
   if (!orphan) return;
@@ -362,6 +391,32 @@ async function modalSubmit(form) {
         retryId: form.dataset.taskId,
         link: `https://claude.ai/code/routines/${result.triggerId}`,
       });
+    } else if (form.dataset.kind === 'duplicate-local') {
+      const fireAtLocal = value('fireAt');
+      await call('localDuplicate', {
+        sourceId: form.dataset.sourceId,
+        id: value('id'),
+        displayName: value('displayName') || undefined,
+        ...(fireAtLocal ? { fireAt: new Date(fireAtLocal).toISOString() } : { cronExpression: value('cronExpression') }),
+        cwd: value('cwd') || undefined,
+        model: value('model') || undefined,
+        enabled: fd.get('enabled') !== null,
+      });
+      state.localWriteNotice = true;
+      $('#modal').close();
+      toast('Duplicated', true);
+      load();
+    } else if (form.dataset.kind === 'duplicate-cloud') {
+      const runOnceLocal = value('runOnceAt');
+      const created = await call('cloudDuplicate', {
+        id: form.dataset.sourceId,
+        name: value('name'),
+        ...(runOnceLocal ? { runOnceAt: new Date(runOnceLocal).toISOString() } : { cronExpression: value('cronExpression') }),
+        enabled: fd.get('enabled') !== null,
+      });
+      $('#modal').close();
+      toast(`Duplicated as ${created.id}`, true);
+      load();
     } else if (form.dataset.kind === 'orphan-import') {
       const cronExpression = value('cronExpression');
       const fireAtLocal = value('fireAt');
@@ -455,6 +510,8 @@ const actions = {
     }
   },
   'move-start': (target) => openMoveDialog(target.dataset.direction, target.dataset.id),
+  'duplicate-local': (target) => openDuplicateDialog('local', target.dataset.id),
+  'duplicate-cloud': (target) => openDuplicateDialog('cloud', target.dataset.id),
   'orphan-open': (target) => openOrphanDialog(target.dataset.id),
   'pick-cwd': (target) => pickCwd(target),
   'modal-close': () => $('#modal').close(),

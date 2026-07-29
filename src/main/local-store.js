@@ -239,6 +239,79 @@ function createLocalStore({
   }
 
   /**
+   * Copy an existing task to a new id: the whole registry entry (so unknown fields
+   * like useWorktree or disableJitter carry over) minus run state, plus a byte-for-byte
+   * copy of its SKILL.md with only the name: line repointed at the new id.
+   * Schedule/cwd/model/name come from `spec` — the caller always decides those, since a
+   * copy that fires at the same moment is rarely what's wanted.
+   */
+  async function duplicateTask(sourceId, spec) {
+    if (await gate.isDesktopRunning({ fresh: true })) {
+      throw new AppError('CLAUDE_RUNNING', 'Claude Desktop is running — close it before duplicating local tasks.');
+    }
+    const tasks = await readTasksRaw();
+    const source = tasks.find((t) => t.id === sourceId);
+    if (!source) throw new AppError('NOT_FOUND', `no local task "${sourceId}"`);
+    assertNewTaskId(spec.id, tasks);
+    // Copy the raw file and rewrite only its name: line, the same way renameTask does,
+    // so extra frontmatter keys and the exact body bytes survive into the copy.
+    let sourceContent;
+    try {
+      sourceContent = fs.readFileSync(source.filePath, 'utf8');
+    } catch {
+      // An empty prompt would look like a working copy and do nothing when it fires.
+      throw new AppError('NOT_FOUND', `cannot read the prompt for "${sourceId}" at ${source.filePath} — nothing to copy`);
+    }
+    const skillDir = path.join(skillsDir, spec.id);
+    const filePath = path.join(skillDir, 'SKILL.md');
+    fs.mkdirSync(skillDir, { recursive: true });
+    // Claim the destination exclusively rather than testing-then-writing: this both
+    // rejects an existing prompt dir and proves the rollback below owns what it deletes,
+    // even against another instance of this app duplicating to the same id.
+    try {
+      fs.closeSync(fs.openSync(filePath, 'wx'));
+    } catch (err) {
+      // Nothing is removed on a failed claim, deliberately. Whoever holds the file may
+      // also have created the directory, and "did the dir exist before my mkdir?" is not
+      // ownership — under a concurrent duplicate that snapshot can be stale by now. An
+      // empty directory we may have just made is harmless: the orphan scan ignores dirs
+      // with no SKILL.md, and the next attempt reuses it.
+      if (err.code === 'EEXIST') {
+        throw new AppError('VALIDATION', `a prompt for "${spec.id}" already exists at ${filePath}`);
+      }
+      throw new AppError('IO', `cannot create ${filePath}: ${err.message}`);
+    }
+    // Inherit everything, then let the spec win. Fields the spec leaves blank fall back
+    // to the source's; run state and the schedule the copy does not use are dropped.
+    const entry = { ...source, ...registryEntry(spec, filePath) };
+    delete entry.lastRunAt;
+    delete entry.lastScheduledFor;
+    delete entry[spec.cronExpression ? 'fireAt' : 'cronExpression'];
+    if (!spec.displayName) delete entry.displayName;
+
+    try {
+      await atomicWriteFile(filePath, translate.renameSkillName(sourceContent, spec.id));
+      await mutateRegistry((envelope) => {
+        assertNewTaskId(spec.id, envelope.scheduledTasks);
+        envelope.scheduledTasks.push(entry);
+      });
+    } catch (err) {
+      // The write lost a race (desktop relaunched, id taken externally): take the prompt
+      // back out so it does not linger as a phantom orphan. Only the file is ours to
+      // delete — the exclusive create proved that much and no more — so the directory
+      // goes only if rmdir finds it empty, which is itself the ownership check.
+      fs.rmSync(filePath, { force: true });
+      try {
+        fs.rmdirSync(skillDir);
+      } catch {
+        // not empty, or not ours — leave it alone
+      }
+      throw err;
+    }
+    return entry;
+  }
+
+  /**
    * Filesystem-only half of a rename: validates the new id, moves the prompt dir, and
    * rewrites SKILL.md's name: line — no registry access at all. Returns the new file
    * path and a restore() that undoes exactly this (content + location). Kept separate
@@ -403,6 +476,7 @@ function createLocalStore({
     updateTask,
     setPromptBody,
     createTask,
+    duplicateTask,
     renameTask,
     applyUpdate,
     importOrphan,
