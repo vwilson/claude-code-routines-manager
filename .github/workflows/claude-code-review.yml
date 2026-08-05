@@ -8,6 +8,11 @@ on:
 
 jobs:
   claude-review:
+    # Fork PRs don't get repository secrets, so CLAUDE_CODE_OAUTH_TOKEN would be
+    # empty and the run would fail on auth. Skip them cleanly rather than
+    # reaching for pull_request_target, which would expose that secret to
+    # untrusted code. Fork PRs still get a review on demand via @claude.
+    if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -34,5 +39,16 @@ jobs:
             lines where you find real problems; skip nitpicks and style points
             already covered by linters. If the change looks good, say so
             briefly rather than inventing findings.
+          # A PR diff is untrusted input, so treat this job as sandboxed:
+          #   --tools     bounds which built-in tools exist at all. --allowed-tools
+          #               only skips permission prompts for tools that are already
+          #               available, so it is not a boundary on its own. Edit/Write
+          #               are absent, leaving the checkout read-only.
+          #   MCP         unaffected by --tools; the inline-comment server is how
+          #               Claude posts findings. The action handles the summary
+          #               comment itself, so no shell write path is needed — a
+          #               Bash(gh pr comment:*) allowance would let injected text
+          #               reach a published comment.
           claude_args: |
-            --allowed-tools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*)"
+            --tools "Bash,Read,Grep,Glob"
+            --allowed-tools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr view:*),Bash(gh pr diff:*)"
