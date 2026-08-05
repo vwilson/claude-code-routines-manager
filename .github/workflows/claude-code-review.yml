@@ -27,7 +27,16 @@ jobs:
     #           branch is local, so the same-repo check above lets them past.
     # Both the actor and the PR author are checked because either one being a
     # bot is enough to fail the run. @claude still works on these PRs on demand.
+    #
+    # !cancelled() is what makes the concurrency group above effective. To
+    # cancel a run, the server re-evaluates the if condition of every running
+    # job and spares any that still evaluate true; the implicit success() that
+    # would fail here applies only to jobs with no condition at all. Every other
+    # term below reads PR facts that a cancellation does not change, so without
+    # a status function this guard would hold the stale review open for its full
+    # 20 minutes — the exact outcome the concurrency group exists to prevent.
     if: |
+      !cancelled() &&
       github.event.pull_request.head.repo.full_name == github.repository &&
       github.event.pull_request.user.type == 'User' &&
       !endsWith(github.actor, '[bot]')
