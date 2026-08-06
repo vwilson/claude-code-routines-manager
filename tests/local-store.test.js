@@ -800,6 +800,26 @@ test('applyUpdate renames and patches in the same call', async () => {
   assert.equal(envelope.scheduledTasks[0].displayName, 'Beta Name');
 });
 
+test('applyUpdate performs only the commit-time gate for a registry-only patch', async () => {
+  let gateCalls = 0;
+  const store = createLocalStore({
+    appDataDir,
+    claudeDir,
+    gate: {
+      isDesktopRunning: async () => {
+        gateCalls += 1;
+        return false;
+      },
+    },
+    now: () => FIXED_NOW,
+  });
+
+  const { task } = await store.applyUpdate('alpha', { patch: { enabled: false } });
+
+  assert.equal(task.enabled, false);
+  assert.equal(gateCalls, 1);
+});
+
 test('applyUpdate gates registry changes before touching the prompt or directory', async () => {
   const store = createLocalStore({
     appDataDir,

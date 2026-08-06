@@ -38,12 +38,16 @@ function createOauth({
     return parsed;
   }
 
-  async function refresh({ force = false } = {}) {
+  async function refresh({ force = false, rejectedAccessToken } = {}) {
     // Re-read right before refreshing: the CLI may have rotated the tokens already,
     // in which case refreshing with our stale refresh_token would fail.
     const file = await readCredentialsFile();
     const oauth = file.claudeAiOauth;
-    if (!force && oauth.expiresAt - now() > EXPIRY_MARGIN_MS) return oauth.accessToken;
+    const currentTokenWasNotRejected =
+      rejectedAccessToken !== undefined && oauth.accessToken !== rejectedAccessToken;
+    if ((!force || currentTokenWasNotRejected) && oauth.expiresAt - now() > EXPIRY_MARGIN_MS) {
+      return oauth.accessToken;
+    }
 
     let response;
     try {
@@ -85,9 +89,10 @@ function createOauth({
 
   /**
    * A currently-valid access token, refreshing (single-flight) when it is within
-   * a minute of expiry. `force` skips the validity shortcut after a 401.
+   * a minute of expiry. `force` skips the validity shortcut after a 401 unless
+   * `rejectedAccessToken` shows that another process already rotated the token on disk.
    */
-  async function getAccessToken({ force = false } = {}) {
+  async function getAccessToken({ force = false, rejectedAccessToken } = {}) {
     if (!force) {
       const { claudeAiOauth } = await readCredentialsFile();
       if (claudeAiOauth.expiresAt - now() > EXPIRY_MARGIN_MS) return claudeAiOauth.accessToken;
@@ -96,7 +101,7 @@ function createOauth({
       throw new AppError('AUTH_REFRESH_FAILED', RELOGIN_MESSAGE, 'previous refresh attempt failed; backing off');
     }
     if (!refreshInFlight) {
-      refreshInFlight = refresh({ force }).finally(() => {
+      refreshInFlight = refresh({ force, rejectedAccessToken }).finally(() => {
         refreshInFlight = null;
       });
     }

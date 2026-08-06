@@ -44,7 +44,7 @@ test('401 forces token rotation and retries the request once with the rotated to
   assert.equal(requests.length, 2);
   assert.equal(requests[0].options.headers.Authorization, 'Bearer rejected-token');
   assert.equal(requests[1].options.headers.Authorization, 'Bearer rotated-token');
-  assert.deepEqual(tokenCalls, [{}, { force: true }]);
+  assert.deepEqual(tokenCalls, [{}, { force: true, rejectedAccessToken: 'rejected-token' }]);
 });
 
 test('refresh failure after a 401 prevents a retry', async () => {
@@ -90,7 +90,7 @@ test('a repeated 401 is returned after exactly one retry', async () => {
     (err) => err.code === 'HTTP_401' && err.message.includes('still unauthorized'),
   );
   assert.equal(requests, 2);
-  assert.deepEqual(tokenCalls, [{}, { force: true }]);
+  assert.deepEqual(tokenCalls, [{}, { force: true, rejectedAccessToken: 'rejected-token' }]);
 });
 
 test('listTriggers follows every cursor and reports a complete result', async () => {

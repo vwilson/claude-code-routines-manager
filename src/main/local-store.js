@@ -610,7 +610,8 @@ function createLocalStore({
 
     const willRename = newId !== undefined && newId !== id;
     const willPatch = Boolean(patch && Object.keys(patch).length > 0);
-    if (willRename || willPatch) {
+    const willStageFilesystemForRegistryChange = willRename || (willPatch && promptBody !== undefined);
+    if (willStageFilesystemForRegistryChange) {
       // This first fresh gate protects the filesystem staging below. mutateRegistry()
       // deliberately gates again immediately before its read/write to catch Desktop
       // starting during the staging window.

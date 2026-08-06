@@ -42,8 +42,10 @@ function createCloudApi({ oauth, fetchImpl = fetch } = {}) {
     let accessToken = await oauth.getAccessToken();
     let response = await send(method, apiPath, accessToken, options);
     if (response.status === 401) {
-      // The token may have just expired (or been rotated by the CLI); refresh once and retry.
-      accessToken = await oauth.getAccessToken({ force: true });
+      // The token may have expired, or another process may already have rotated it.
+      // Let OAuth reuse a different valid token found on disk before forcing a
+      // second rotation of the CLI's shared credentials.
+      accessToken = await oauth.getAccessToken({ force: true, rejectedAccessToken: accessToken });
       response = await send(method, apiPath, accessToken, options);
     }
     const text = await response.text();

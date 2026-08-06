@@ -78,6 +78,30 @@ test('forced refresh rotates an unexpired but rejected access token', async () =
   assert.equal(saved.unknownTopLevel, 'keep-me');
 });
 
+test('forced refresh reuses a different valid token already rotated on disk', async () => {
+  const { credentialsPath } = credentialsFixture();
+  const file = JSON.parse(fs.readFileSync(credentialsPath, 'utf8'));
+  file.claudeAiOauth.accessToken = 'cli-rotated-access-token';
+  file.claudeAiOauth.refreshToken = 'cli-rotated-refresh-token';
+  fs.writeFileSync(credentialsPath, JSON.stringify(file));
+
+  let refreshRequests = 0;
+  const oauth = createOauth({
+    credentialsPath,
+    now: () => FIXED_NOW,
+    fetchImpl: async () => {
+      refreshRequests++;
+      throw new Error('the token endpoint should not be called');
+    },
+  });
+
+  assert.equal(
+    await oauth.getAccessToken({ force: true, rejectedAccessToken: 'rejected-access-token' }),
+    'cli-rotated-access-token',
+  );
+  assert.equal(refreshRequests, 0);
+});
+
 test('forced refresh failure is reported and leaves credentials unchanged', async () => {
   const { credentialsPath } = credentialsFixture();
   const before = fs.readFileSync(credentialsPath, 'utf8');

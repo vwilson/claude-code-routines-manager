@@ -213,10 +213,10 @@ function validateCloudCron(expr) {
 function parseSkillMd(content) {
   const frontmatter = { name: undefined, description: undefined };
   const lines = String(content).split(/\r?\n/);
-  if (lines[0]?.trim() !== '---') return { frontmatter, body: String(content) };
+  if (lines[0] !== '---') return { frontmatter, body: String(content) };
   let end = -1;
   for (let i = 1; i < lines.length; i++) {
-    if (lines[i].trim() === '---') {
+    if (lines[i] === '---') {
       end = i;
       break;
     }
@@ -251,11 +251,11 @@ function replaceSkillBody(content, body) {
   const text = String(content);
   const parts = text.split(/(\r\n|\r|\n)/); // [line, delimiter, line, delimiter, ...]
   const lines = parts.filter((_, i) => i % 2 === 0);
-  if (lines[0]?.trim() !== '---') return null;
+  if (lines[0] !== '---') return null;
 
   let end = -1;
   for (let i = 1; i < lines.length; i++) {
-    if (lines[i].trim() === '---') {
+    if (lines[i] === '---') {
       end = i;
       break;
     }
@@ -286,10 +286,10 @@ function renameSkillName(content, name) {
   const text = String(content);
   const parts = text.split(/(\r\n|\r|\n)/); // [line, delimiter, line, delimiter, ...]
   const lines = parts.filter((_, i) => i % 2 === 0);
-  if (lines[0]?.trim() !== '---') return text;
+  if (lines[0] !== '---') return text;
   let end = -1;
   for (let i = 1; i < lines.length; i++) {
-    if (lines[i].trim() === '---') {
+    if (lines[i] === '---') {
       end = i;
       break;
     }

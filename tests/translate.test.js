@@ -197,6 +197,23 @@ test('replaceSkillBody preserves a complex frontmatter block byte-for-byte', () 
   assert.equal(translate.replaceSkillBody(original, 'New body.'), `${frontmatter}\r\n\r\nNew body.\r\n`);
 });
 
+test('replaceSkillBody ignores an indented delimiter inside a YAML block scalar', () => {
+  const frontmatter = [
+    '---\n',
+    'name: alpha\n',
+    'description: block scalar delimiter\n',
+    'instructions: |\n',
+    '  first line\n',
+    '  ---\n',
+    '  still part of the scalar\n',
+    'unknown-key: keep-me\n',
+    '---',
+  ].join('');
+  const original = `${frontmatter}\n\nOld body.\n`;
+
+  assert.equal(translate.replaceSkillBody(original, 'New body.'), `${frontmatter}\n\nNew body.\n`);
+});
+
 test('replaceSkillBody declines files without a complete frontmatter block', () => {
   assert.equal(translate.replaceSkillBody('Bare body.', 'New body.'), null);
   assert.equal(translate.replaceSkillBody('---\nname: alpha\nNo closing delimiter', 'New body.'), null);
