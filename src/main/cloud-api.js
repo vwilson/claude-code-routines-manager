@@ -90,10 +90,10 @@ function createCloudApi({ oauth, fetchImpl = fetch } = {}) {
   async function listTriggers() {
     const allTriggers = [];
     const seenCursors = new Set();
-    let afterId;
+    let cursor;
 
     for (let page = 0; page < MAX_TRIGGER_PAGES; page++) {
-      const query = afterId ? `?after_id=${encodeURIComponent(afterId)}` : '';
+      const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : '';
       const data = await request('GET', triggers(query), { beta: TRIGGERS_BETA });
       const pagesFetched = page + 1;
       const batch = data.data;
@@ -115,10 +115,10 @@ function createCloudApi({ oauth, fetchImpl = fetch } = {}) {
       }
       if (
         data.has_more !== true ||
-        typeof data.last_id !== 'string' ||
-        data.last_id === '' ||
+        typeof data.next_cursor !== 'string' ||
+        data.next_cursor === '' ||
         batch.length === 0 ||
-        seenCursors.has(data.last_id)
+        seenCursors.has(data.next_cursor)
       ) {
         return {
           triggers: allTriggers,
@@ -130,8 +130,8 @@ function createCloudApi({ oauth, fetchImpl = fetch } = {}) {
         };
       }
 
-      seenCursors.add(data.last_id);
-      afterId = data.last_id;
+      seenCursors.add(data.next_cursor);
+      cursor = data.next_cursor;
     }
 
     return {

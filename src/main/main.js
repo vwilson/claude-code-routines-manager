@@ -103,21 +103,6 @@ function startApplication({ app, BrowserWindow, loadServices }) {
   return true;
 }
 
-if (require.main === module) {
-  const { app, BrowserWindow } = require('electron');
-  startApplication({
-    app,
-    BrowserWindow,
-    loadServices: () => ({
-      createDesktopGate: require('./claude-desktop').createDesktopGate,
-      createOauth: require('./oauth').createOauth,
-      createCloudApi: require('./cloud-api').createCloudApi,
-      createLocalStore: require('./local-store').createLocalStore,
-      registerIpc: require('./ipc').registerIpc,
-    }),
-  });
-}
-
 module.exports = {
   APP_PAGE_PATH,
   createWindow,

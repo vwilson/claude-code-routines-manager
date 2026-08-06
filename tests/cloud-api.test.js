@@ -96,7 +96,7 @@ test('a repeated 401 is returned after exactly one retry', async () => {
 test('listTriggers follows every cursor and reports a complete result', async () => {
   const urls = [];
   const pages = [
-    { data: [{ id: 'trigger-1' }], has_more: true, last_id: 'cursor one' },
+    { data: [{ id: 'trigger-1' }], has_more: true, next_cursor: 'cursor one' },
     { data: [{ id: 'trigger-2' }], has_more: false },
   ];
   const api = createCloudApi({
@@ -118,7 +118,7 @@ test('listTriggers follows every cursor and reports a complete result', async ()
   });
   assert.deepEqual(urls, [
     'https://api.anthropic.com/v1/code/triggers',
-    'https://api.anthropic.com/v1/code/triggers?after_id=cursor%20one',
+    'https://api.anthropic.com/v1/code/triggers?cursor=cursor%20one',
   ]);
 });
 
@@ -132,15 +132,15 @@ test('listTriggers reports malformed pagination instead of silently truncating',
     },
     {
       name: 'empty page with more pages claimed',
-      pages: [{ data: [], has_more: true, last_id: 'cursor-1' }],
+      pages: [{ data: [], has_more: true, next_cursor: 'cursor-1' }],
       expectedTriggers: [],
       expectedRequests: 1,
     },
     {
       name: 'repeated cursor',
       pages: [
-        { data: [{ id: 'trigger-1' }], has_more: true, last_id: 'cursor-1' },
-        { data: [{ id: 'trigger-2' }], has_more: true, last_id: 'cursor-1' },
+        { data: [{ id: 'trigger-1' }], has_more: true, next_cursor: 'cursor-1' },
+        { data: [{ id: 'trigger-2' }], has_more: true, next_cursor: 'cursor-1' },
       ],
       expectedTriggers: [{ id: 'trigger-1' }, { id: 'trigger-2' }],
       expectedRequests: 2,
@@ -181,7 +181,7 @@ test('listTriggers reports when the defensive page bound is reached', async () =
       return response(200, {
         data: [{ id: `trigger-${requests}` }],
         has_more: true,
-        last_id: `cursor-${requests}`,
+        next_cursor: `cursor-${requests}`,
       });
     },
   });
