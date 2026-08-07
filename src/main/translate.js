@@ -213,10 +213,10 @@ function validateCloudCron(expr) {
 function parseSkillMd(content) {
   const frontmatter = { name: undefined, description: undefined };
   const lines = String(content).split(/\r?\n/);
-  if (lines[0]?.trim() !== '---') return { frontmatter, body: String(content) };
+  if (lines[0] !== '---') return { frontmatter, body: String(content) };
   let end = -1;
   for (let i = 1; i < lines.length; i++) {
-    if (lines[i].trim() === '---') {
+    if (lines[i] === '---') {
       end = i;
       break;
     }
@@ -241,6 +241,36 @@ function buildSkillMd({ name, description, body }) {
 }
 
 /**
+ * Replace only the markdown body of a SKILL.md that has a complete frontmatter
+ * block. The block itself is copied directly from the input, so comments, unknown
+ * keys, quoting, multiline YAML, whitespace, and mixed line endings all survive
+ * byte-for-byte. Returns null when there is no complete frontmatter block, allowing
+ * the caller to construct a canonical file instead.
+ */
+function replaceSkillBody(content, body) {
+  const text = String(content);
+  const parts = text.split(/(\r\n|\r|\n)/); // [line, delimiter, line, delimiter, ...]
+  const lines = parts.filter((_, i) => i % 2 === 0);
+  if (lines[0] !== '---') return null;
+
+  let end = -1;
+  for (let i = 1; i < lines.length; i++) {
+    if (lines[i] === '---') {
+      end = i;
+      break;
+    }
+  }
+  if (end === -1) return null;
+
+  // Include the closing delimiter line verbatim, then use its existing newline
+  // style (or the opening delimiter's when the closing line was at EOF) for the
+  // newly-authored separator and body terminator.
+  const frontmatter = parts.slice(0, end * 2 + 1).join('');
+  const eol = parts[end * 2 + 1] || parts[1] || '\n';
+  return `${frontmatter}${eol}${eol}${String(body).trim()}${eol}`;
+}
+
+/**
  * Rewrite only the frontmatter `name:` line of a SKILL.md, preserving every other
  * line — extra frontmatter fields, body formatting, and even mixed line-ending styles
  * within the same file — verbatim. A no-op if there's no frontmatter block or no
@@ -256,10 +286,10 @@ function renameSkillName(content, name) {
   const text = String(content);
   const parts = text.split(/(\r\n|\r|\n)/); // [line, delimiter, line, delimiter, ...]
   const lines = parts.filter((_, i) => i % 2 === 0);
-  if (lines[0]?.trim() !== '---') return text;
+  if (lines[0] !== '---') return text;
   let end = -1;
   for (let i = 1; i < lines.length; i++) {
-    if (lines[i].trim() === '---') {
+    if (lines[i] === '---') {
       end = i;
       break;
     }
@@ -292,5 +322,6 @@ module.exports = {
   validateCloudCron,
   parseSkillMd,
   buildSkillMd,
+  replaceSkillBody,
   renameSkillName,
 };

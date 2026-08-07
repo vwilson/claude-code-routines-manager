@@ -111,18 +111,24 @@ function startOfNextMonth(t, utc) {
 
 /**
  * The next `count` occurrences strictly after `from`, scanned minute-by-minute with
- * month/day/hour skips, bounded at 366 days (an expression that never matches, e.g.
- * Feb 30, simply returns fewer results).
+ * month/day/hour skips. The Gregorian calendar can put consecutive leap-day matches
+ * almost eight years apart across a non-leap century (for example 2096 -> 2104), so
+ * the bounded search allows eight calendar years per requested occurrence. Because
+ * mismatched months and days are skipped as whole fields, impossible expressions such
+ * as Feb 30 still terminate after only a small number of iterations.
  */
 function nextOccurrences(expr, { utc = false, from, count = 3 } = {}) {
   const p = parseCron(expr);
   const g = accessors(utc);
   const start = from instanceof Date ? from : new Date(from);
   if (Number.isNaN(start.getTime())) throw new CronError('invalid "from" date');
-  const limit = start.getTime() + 366 * 24 * 60 * 60 * 1000;
+  const yearsToSearch = Math.max(1, count) * 8;
+  const limit = new Date(start);
+  if (utc) limit.setUTCFullYear(limit.getUTCFullYear() + yearsToSearch);
+  else limit.setFullYear(limit.getFullYear() + yearsToSearch);
   const out = [];
   let t = new Date((Math.floor(start.getTime() / 60000) + 1) * 60000);
-  while (out.length < count && t.getTime() <= limit) {
+  while (out.length < count && t.getTime() <= limit.getTime()) {
     if (!p.month.values.includes(g.month(t))) {
       t = startOfNextMonth(t, utc);
     } else if (!dayMatches(p, g, t)) {

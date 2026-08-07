@@ -4,7 +4,7 @@ const $ = (selector) => document.querySelector(selector);
 
 const state = {
   local: null, // { registryPath, desktopRunning, tasks, orphans }
-  cloud: null, // { triggers, environments }
+  cloud: null, // { triggers, environments, status }
   localError: null,
   cloudError: null,
   drawer: null, // { kind: 'local'|'cloud', id, data, dirty }
@@ -94,8 +94,11 @@ function renderChips() {
     cloud.className = 'chip err';
     cloud.textContent = 'Cloud: error';
   } else if (state.cloud) {
-    cloud.className = 'chip ok';
-    cloud.textContent = `Cloud: ${state.cloud.triggers.length} routines`;
+    const incomplete = state.cloud.status?.complete === false;
+    cloud.className = incomplete ? 'chip warn' : 'chip ok';
+    cloud.textContent = incomplete
+      ? `Cloud: ${state.cloud.triggers.length} routines shown — incomplete`
+      : `Cloud: ${state.cloud.triggers.length} routines`;
   } else {
     cloud.className = 'chip';
     cloud.textContent = 'Cloud: loading…';
@@ -129,6 +132,13 @@ function renderBanners() {
       ]),
     );
   }
+  if (state.cloud?.status?.complete === false) {
+    banners.push(
+      ui.bannerEl('warn', state.cloud.status.warning ?? 'The cloud routines list is incomplete.', [
+        { label: 'Retry', action: 'refresh' },
+      ]),
+    );
+  }
   if (state.localError) {
     banners.push(ui.bannerEl('err', `Local: ${state.localError.message ?? state.localError}`));
   }
@@ -155,7 +165,8 @@ function renderPanes() {
   const cloudList = $('#cloud-list');
   if (state.cloud) {
     cloudList.replaceChildren(...state.cloud.triggers.map(ui.cloudTriggerRow));
-    $('#cloud-subtitle').textContent = `${state.cloud.environments.length} environment(s)`;
+    const partial = state.cloud.status?.complete === false ? ' · partial list' : '';
+    $('#cloud-subtitle').textContent = `${state.cloud.environments.length} environment(s)${partial}`;
   } else {
     cloudList.replaceChildren(ui.el('div', { class: 'muted' }, state.cloudError ? 'failed to load' : 'loading…'));
   }

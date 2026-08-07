@@ -69,6 +69,27 @@ test('an expression that never matches returns fewer occurrences', () => {
   assert.deepEqual(next, []);
 });
 
+test('nextOccurrences finds leap days beyond the old one-year scan bound', () => {
+  const next = cron.nextOccurrences('0 0 29 2 *', {
+    utc: true,
+    from: new Date('2025-03-01T00:00:00Z'),
+    count: 3,
+  });
+  assert.deepEqual(
+    next.map((d) => d.toISOString()),
+    ['2028-02-29T00:00:00.000Z', '2032-02-29T00:00:00.000Z', '2036-02-29T00:00:00.000Z'],
+  );
+});
+
+test('nextOccurrences crosses a skipped Gregorian century leap year', () => {
+  const [next] = cron.nextOccurrences('0 0 29 2 *', {
+    utc: true,
+    from: new Date('2096-03-01T00:00:00Z'),
+    count: 1,
+  });
+  assert.equal(next.toISOString(), '2104-02-29T00:00:00.000Z');
+});
+
 test('minIntervalMinutes', () => {
   const from = new Date('2026-07-29T00:00:00Z'); // Wednesday
   assert.equal(cron.minIntervalMinutes('*/5 * * * *', { utc: true, from }), 5);
